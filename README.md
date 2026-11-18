@@ -87,7 +87,10 @@ The config holds secrets (RTSP alias, ring token): never commit it. State (setup
 Ed25519 key) lives in `state_dir`, mode 0600.
 
 Deploy: one static binary plus a systemd unit, on a host in the same L2 network as the home hubs
-(mDNS).
+(mDNS). From a Mac: `make deploy HOST=root@<host>` (cargo-zigbuild, x86_64 musl, ~2 MB), with
+`/etc/rust-homekit-cam.toml` (0600, `state_dir` left at its default) on the host. Two-way
+audio needs the host to reach the camera on UDP 7004: Protect's talk-back session points at
+the camera, it does not relay.
 
 ## Milestones
 
