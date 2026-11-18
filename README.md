@@ -18,9 +18,11 @@ vendor-specific extras (UniFi Protect today) are optional backends:
 | Snapshots (tiles, notifications) | ✓ from the camera's JPEG URL (`snapshot_url`) | ✓ from the Protect API |
 | RTSP login | Basic / Digest from `rtsp://user:pass@…` | not needed (alias URLs) |
 
-Status: early but working. Pairing, the doorbell ring, live video, camera audio and two-way
-audio all work, none of them transcoded (tested with a UniFi Protect Doorbell Lite, iPhone and
-home hubs, running in a 256 MB Debian LXC).
+Status: early but working. Pairing, the doorbell ring, live video, camera audio, two-way audio,
+snapshots, the motion sensor and HomeKit Secure Video all work, none of them transcoded (tested
+with a UniFi Protect Doorbell Lite, iPhone and home hubs, on the LAN and remotely, running in a
+256 MB Debian LXC). Adding HKSV (or changing the audio offer) to an accessory that is already
+in a home needs a remove + re-add: iOS keeps what it saw when the accessory was added.
 
 ## What it exposes
 
