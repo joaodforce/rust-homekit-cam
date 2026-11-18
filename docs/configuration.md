@@ -9,14 +9,15 @@ starting point.
 | Key | Default | Meaning |
 |---|---|---|
 | `name` | required | Name in the Home app |
-| `doorbell` | `true` | `true`: a Video Doorbell (ring button, chime); `false`: a camera |
+| `doorbell` | `true` | `true`: a Video Doorbell (ring notification, HomePod chime); works for any camera, rings come from `POST /ring` or a backend; `false`: a plain camera |
 | `manufacturer`, `model` | `rust-homekit-cam`, `Video Doorbell` / `Camera` | Shown in the accessory details |
 | `hap_port` | `51830` | TCP port HomeKit talks to; **different for each camera** on one host |
 | `state_dir` | see below | Pairing identity, setup code, recording settings |
 | `motion` | on with `[protect]` | Adds the Motion Sensor (the trigger for HomeKit Secure Video); `true` to feed it with `POST /motion` |
 | `motion_hold` | `10` | Seconds the sensor stays on after the last motion |
 | `hksv` | on with the Motion Sensor | HomeKit Secure Video services; `false` hides them |
-| `ring_listen` | none | `"0.0.0.0:8780"`: listen for `POST /ring` and `POST /motion`; a different port per camera |
+| `talkback` | `true` | `false` turns two-way audio off (e.g. when the camera's speaker misbehaves) |
+| `ring_listen` | none | `"0.0.0.0:8780"`: listen for the event endpoints below; a different port per camera |
 | `ring_token` | required with `ring_listen` | Bearer token for those requests |
 | `snapshot_url` | Protect's snapshot API with `[protect]` | `http://[user:pass@]host/path` returning a JPEG (Basic or Digest) |
 
@@ -50,6 +51,17 @@ audio in recordings, an **AAC** track (`mpeg4-generic`). Without them you get vi
 
 With `[protect]` the camera gets: rings and motion from Protect's events, snapshots from the
 Protect API, and two-way audio (talk-back). See [unifi-protect.md](unifi-protect.md).
+
+## Event endpoints (`ring_listen`)
+
+All `POST`, with `Authorization: Bearer <ring_token>` (or `?token=<ring_token>`):
+
+| Path | Effect |
+|---|---|
+| `/ring` | Rings the doorbell (repeats within 3 s count once) |
+| `/motion` | Motion pulse: the sensor is on for `motion_hold` seconds (again from now on each call) |
+| `/motion/start` | Motion on until `/motion/end` (at most 10 minutes, in case the end is lost) |
+| `/motion/end` | The sensor goes off `motion_hold` seconds from now |
 
 ## Commands
 

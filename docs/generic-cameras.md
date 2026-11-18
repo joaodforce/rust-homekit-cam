@@ -47,7 +47,10 @@ rest_command:
 
 and call `rest_command.frontdoor_ring` / `rest_command.frontdoor_motion` from automations
 (e.g. when the camera's motion `binary_sensor` turns on). Each `POST /motion` keeps the sensor on
-for `motion_hold` seconds; call it again while motion lasts. Rings within 3 s count once.
+for `motion_hold` seconds. If your source knows when motion ends, use `/motion/start` and
+`/motion/end` instead (e.g. on the `binary_sensor` turning on and off). Rings within 3 s count
+once. Any camera can be a doorbell (`doorbell = true`): a button, an intercom or a Zigbee
+switch can ring it through `/ring`.
 
 Test from a shell:
 

@@ -56,6 +56,8 @@ struct Config {
     /// Pairing and recording state. Default: systemd's $STATE_DIRECTORY when run as a service,
     /// else /var/lib/rust-homekit-cam/<config file name> (so `code` / `reset` find it too).
     state_dir: Option<PathBuf>,
+    /// Two-way audio; `false` turns it off (the Speaker stays, nothing is sent to the camera)
+    talkback: Option<bool>,
     /// HomeKit Secure Video: on by default with the Motion Sensor (its trigger)
     hksv: Option<bool>,
     /// Motion Sensor: on by default when there is a Protect backend; `POST /motion` feeds it too.
@@ -133,6 +135,8 @@ fn main() {
             });
             if protect.is_none() {
                 log("no [protect]: two-way audio off".into());
+            } else if cfg.talkback == Some(false) {
+                log("talkback = false: two-way audio off".into());
             }
             let snapshots = match (&cfg.snapshot_url, &protect) {
                 (Some(u), _) => Some(snapshot::Source::Url(u.clone())),
@@ -149,7 +153,7 @@ fn main() {
                 .flatten()
                 .map(|url| hksv::Hksv::new(cfg.doorbell, cfg.state_dir.clone().unwrap(), url).unwrap_or_else(|e| die(e)));
             let cam = Arc::new(
-                camera::Camera::new(&cfg.name, cfg.doorbell, cfg.rtsp.clone(), protect.clone())
+                camera::Camera::new(&cfg.name, cfg.doorbell, cfg.rtsp.clone(), protect.clone().filter(|_| cfg.talkback.unwrap_or(true)))
                     .with_info(cfg.manufacturer.clone(), cfg.model.clone())
                     .with_snapshots(snapshots.clone())
                     .with_motion(motion_state.clone())

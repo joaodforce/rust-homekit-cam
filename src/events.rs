@@ -56,7 +56,30 @@ impl Events {
 
     /// Motion seen (again): the sensor turns on, and off `hold` after the last trigger.
     pub fn motion(&self, source: &str) {
+        if let Some(g) = self.motion_on(source) {
+            self.motion_off_after(g, None);
+        }
+    }
+
+    /// Motion started and lasts until `motion_end` (at most 10 minutes, in case the end is lost).
+    pub fn motion_start(&self, source: &str) {
+        if let Some(g) = self.motion_on(source) {
+            self.motion_off_after(g, Some(Duration::from_secs(600)));
+        }
+    }
+
+    /// Motion ended: the sensor goes off `hold` from now (unless motion comes back).
+    pub fn motion_end(&self, _source: &str) {
         let Some(m) = &self.motion else { return };
+        if m.state.load(Ordering::SeqCst) {
+            let g = m.generation.fetch_add(1, Ordering::SeqCst) + 1;
+            self.motion_off_after(g, None);
+        }
+    }
+
+    /// Sensor on (notifying on the change); returns the trigger's generation.
+    fn motion_on(&self, source: &str) -> Option<u64> {
+        let m = self.motion.as_ref()?;
         let generation = m.generation.fetch_add(1, Ordering::SeqCst) + 1;
         if !m.state.swap(true, Ordering::SeqCst) {
             crate::log(format!("motion ({source})"));
@@ -65,9 +88,16 @@ impl Events {
             }
             self.server.notify(m.iid, serde_json::json!(true));
         }
-        let (state, gen_now, hold, server, iid) = (m.state.clone(), m.generation.clone(), m.hold, self.server.clone(), m.iid);
+        Some(generation)
+    }
+
+    /// Off after `after` (default: the hold time), unless a later trigger came in meanwhile.
+    fn motion_off_after(&self, generation: u64, after: Option<Duration>) {
+        let Some(m) = &self.motion else { return };
+        let (state, gen_now, server, iid) = (m.state.clone(), m.generation.clone(), self.server.clone(), m.iid);
+        let wait = after.unwrap_or(m.hold);
         std::thread::spawn(move || {
-            std::thread::sleep(hold);
+            std::thread::sleep(wait);
             if gen_now.load(Ordering::SeqCst) == generation && state.swap(false, Ordering::SeqCst) {
                 crate::log("motion cleared".into());
                 server.notify(iid, serde_json::json!(false));
@@ -76,10 +106,11 @@ impl Events {
     }
 }
 
-/// `POST /ring`, `POST /motion` with `Authorization: Bearer <token>` (or `?token=`).
+/// `POST /ring`, `POST /motion` (a pulse: on for `motion_hold`), `POST /motion/start` and
+/// `POST /motion/end`, with `Authorization: Bearer <token>` (or `?token=`).
 pub fn http(listen: &str, token: String, events: Arc<Events>) -> Result<(), String> {
     let l = TcpListener::bind(listen).map_err(|e| format!("event listener {listen}: {e}"))?;
-    crate::log(format!("events: POST http://{listen}/ring, /motion"));
+    crate::log(format!("events: POST http://{listen}/ring, /motion, /motion/start, /motion/end"));
     std::thread::spawn(move || {
         for mut s in l.incoming().flatten() {
             let _ = s.set_read_timeout(Some(Duration::from_secs(5)));
@@ -116,11 +147,15 @@ pub fn http(listen: &str, token: String, events: Arc<Events>) -> Result<(), Stri
                     events.ring("http");
                     "204 No Content"
                 }
-                ("POST", "/motion", true) if events.motion.is_some() => {
-                    events.motion("http");
+                ("POST", "/motion" | "/motion/start" | "/motion/end", true) if events.motion.is_some() => {
+                    match path {
+                        "/motion/start" => events.motion_start("http"),
+                        "/motion/end" => events.motion_end("http"),
+                        _ => events.motion("http"),
+                    }
                     "204 No Content"
                 }
-                ("POST", "/ring" | "/motion", false) => "401 Unauthorized",
+                ("POST", "/ring" | "/motion" | "/motion/start" | "/motion/end", false) => "401 Unauthorized",
                 _ => "404 Not Found",
             };
             let _ = write!(s, "HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
