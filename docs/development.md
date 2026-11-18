@@ -24,6 +24,22 @@ cargo-zigbuild`, `rustup target add x86_64-unknown-linux-musl`), copies it and t
 template unit over SSH and restarts every `rust-homekit-cam@*` instance. The Makefile puts
 rustup's toolchain ahead of Homebrew's Rust.
 
+## CI and releases
+
+GitHub Actions ([.github/workflows/ci.yml](../.github/workflows/ci.yml)) runs the tests on every
+push and pull request, then builds static musl binaries with cargo-zigbuild for x86_64, aarch64
+and armv7 (downloadable from the run's artifacts).
+
+To release: bump `version` in `Cargo.toml`, commit, then tag and push:
+
+```bash
+git tag v0.2.0 && git push origin v0.2.0
+```
+
+The tag must match `Cargo.toml`. CI then publishes a GitHub release with one `.tar.gz` per
+architecture (binary, unit file, example config, README, license) and `SHA256SUMS`;
+[install.sh](../install.sh) installs the latest one.
+
 ## Layout
 
 | Path | What |

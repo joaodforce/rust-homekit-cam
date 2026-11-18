@@ -30,21 +30,23 @@ an Intelbras (Dahua) ONVIF camera, iPhones and home hubs, in a 256 MB Debian LXC
 
 ## Quick start
 
-**1. Install.** Build on a Mac and deploy over SSH (`cargo-zigbuild` builds a static x86_64
-binary):
+**1. Install** the static binary from the latest release (x86_64, arm64 or 32-bit ARM; any
+distro with systemd). Run the same line again to upgrade:
 
 ```bash
-make deploy HOST=root@<linux-host>
+curl -fsSL https://raw.githubusercontent.com/joaodforce/rust-homekit-cam/main/install.sh | sudo sh
 ```
 
-or build on the host itself (`cargo build --release`, then copy `target/release/rust-homekit-cam`
-to `/usr/local/bin/` and `deploy/rust-homekit-cam@.service` to `/etc/systemd/system/`).
+It checks the download's SHA-256, installs `/usr/local/bin/rust-homekit-cam` and the
+`rust-homekit-cam@.service` template, and restarts cameras that are already running. Prefer
+doing it by hand? Download a `.tar.gz` from [Releases](https://github.com/joaodforce/rust-homekit-cam/releases)
+and copy the binary and unit file yourself, or build from source ([docs/development.md](docs/development.md)).
 
 **2. Configure one camera.** Each camera is a file named after it:
 
 ```bash
 install -d -m 700 /etc/rust-homekit-cam
-cp config.example.toml /etc/rust-homekit-cam/frontdoor.toml
+cp /usr/local/share/rust-homekit-cam/config.example.toml /etc/rust-homekit-cam/frontdoor.toml
 chmod 600 /etc/rust-homekit-cam/frontdoor.toml
 ```
 

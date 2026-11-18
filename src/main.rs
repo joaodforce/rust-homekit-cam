@@ -140,6 +140,9 @@ fn die(msg: String) -> ! {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    if matches!(args.get(1).map(String::as_str), Some("--version" | "-V" | "version")) {
+        return println!("rust-homekit-cam {}", env!("CARGO_PKG_VERSION"));
+    }
     if args.get(1).map(String::as_str) == Some("onvif-discover") {
         for (url, scopes) in onvif::discover(std::time::Duration::from_secs(3)) {
             let pick = |k: &str| scopes.split_whitespace().find_map(|s| s.split_once(&format!("/{k}/")).map(|(_, v)| v.replace("%20", " "))).unwrap_or_default();
@@ -149,7 +152,7 @@ fn main() {
     }
     let (cmd, path) = match args.as_slice() {
         [_, c, p] | [_, c, p, _] => (c.as_str(), p.as_str()),
-        _ => die("usage: rust-homekit-cam serve|code|reset|probe|record-test|protect-cameras|onvif-info <config.toml>, or onvif-discover".into()),
+        _ => die("usage: rust-homekit-cam serve|code|reset|probe|snapshot|record-test|protect-cameras|onvif-info <config.toml>, onvif-discover, or --version".into()),
     };
     let mut cfg = load(path);
     match cmd {

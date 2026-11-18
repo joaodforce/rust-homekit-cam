@@ -3,7 +3,8 @@ name = "rust-homekit-cam"
 version = "0.1.0"
 edition = "2024"
 license = "GPL-3.0-only"
-description = "UniFi Protect cameras and doorbells as native HomeKit accessories, no transcoding"
+description = "RTSP, ONVIF and UniFi Protect cameras and doorbells as native HomeKit accessories, no transcoding"
+repository = "https://github.com/joaodforce/rust-homekit-cam"
 
 [dependencies]
 aes = "0.8"
