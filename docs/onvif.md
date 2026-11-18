@@ -52,8 +52,8 @@ Switch the camera's streams to **H.264** in its web UI; H.265 profiles are skipp
 ## Brand notes
 
 - **Intelbras / Dahua**: ONVIF on port 80. Older firmware doesn't implement GetSnapshotUri at all
-  (a VIP-1130-B on 2.680, 2021, answers "This optional method is not implemented" in both Media
-  and Media2; `onvif-info` shows the reason). Use
+  (a VIP-1130-B answers "This optional method is not implemented" in both Media and Media2, on
+  firmware 2.680 from 2021 and the 2023-10-26 update alike; `onvif-info` shows the reason). Use
   `snapshot_url = "http://user:pass@<camera>/cgi-bin/snapshot.cgi"` (Digest, handled). Motion
   arrives as `VideoSource/MotionAlarm`.
 - The camera's clock may be off: the login uses the camera's own time, so that's fine.
