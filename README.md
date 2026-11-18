@@ -14,6 +14,7 @@ vendor-specific extras (UniFi Protect today) are optional backends:
 | Two-way audio | not yet (RTSP back-channel / ONVIF planned) | ✓ (talk-back session, Opus passthrough) |
 | Doorbell ring | ✓ `POST /ring` from anything (HA, Node-RED, a webhook) | ✓ Protect events, and `POST /ring` |
 | Motion sensor (motion notifications; HKSV trigger) | ✓ `POST /motion` from anything | ✓ Protect events (smart detections, or any motion) |
+| HomeKit Secure Video | ✓ (H.264 + AAC copied into fMP4) | ✓ |
 | Snapshots (tiles, notifications) | ✓ from the camera's JPEG URL (`snapshot_url`) | ✓ from the Protect API |
 | RTSP login | Basic / Digest from `rtsp://user:pass@…` | not needed (alias URLs) |
 
@@ -40,7 +41,15 @@ Motion Sensor: on with each motion trigger, off `motion_hold` seconds (default 1
 last one. Protect events keep it on while a detection lasts. Rings from two sources within 3 s
 count once.
 
-Later: **HomeKit Secure Video**
+**HomeKit Secure Video** (on by default with the Motion Sensor; `hksv = false` to hide it):
+the hub enables recording, then on motion (or a ring) opens a HomeKit Data Stream (its own
+encrypted TCP channel, keys from the HAP session) and pulls fragmented MP4. While recording is
+enabled one RTSP connection (the ~2 Mbps channel) keeps a keyframe-aligned prebuffer of the
+last ~4 s; a recording is that prebuffer plus live video, cut into fragments at keyframes. The
+camera's H.264 and AAC-LC (Protect's AAC track) go in as they are; a camera without AAC records
+without audio. `record-test <config> <out.mp4>` writes what the hub would get.
+
+Later:
 (Camera Operating Mode, Camera Event Recording Management, Data Stream: fMP4 fragments of the same
 H.264, still no transcoding).
 
@@ -129,8 +138,9 @@ the camera, it does not relay.
 5. Deploy as a service.
 6. Snapshots.
 7. Motion sensor (Protect events, `POST /motion`).
-8. Later: several cameras per process, RTSP back-channel talk-back, motion sensor,
-   HomeKit Secure Video, optional audio transcode for AAC-only cameras.
+8. HomeKit Secure Video.
+9. Later: several cameras per process, RTSP back-channel talk-back, motion sensor,
+   optional audio transcode for AAC-only / Opus-only cameras.
 
 ## License
 

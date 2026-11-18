@@ -6,8 +6,12 @@
 mod camera;
 mod h264;
 mod hap;
+mod hds;
+mod hksv;
+mod mp4;
 mod httpc;
 mod protect;
+mod recording;
 mod events;
 mod rtsp;
 mod snapshot;
@@ -49,6 +53,8 @@ struct Config {
     hap_port: u16,
     #[serde(default = "default_state")]
     state_dir: PathBuf,
+    /// HomeKit Secure Video: on by default with the Motion Sensor (its trigger)
+    hksv: Option<bool>,
     /// Motion Sensor: on by default when there is a Protect backend; `POST /motion` feeds it too.
     motion: Option<bool>,
     /// seconds the sensor stays on after the last motion
@@ -96,7 +102,7 @@ fn die(msg: String) -> ! {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let (cmd, path) = match args.as_slice() {
-        [_, c, p] => (c.as_str(), p.as_str()),
+        [_, c, p] | [_, c, p, _] => (c.as_str(), p.as_str()),
         _ => die("usage: rust-homekit-cam serve|code|reset <config.toml>".into()),
     };
     let cfg = load(path);
@@ -106,6 +112,7 @@ fn main() {
             println!("{code} ({})", if paired { "paired" } else { "not paired" });
         }
         "probe" => probe(&cfg.rtsp),
+        "record-test" => record_test(&cfg.rtsp, args.get(3).map(String::as_str).unwrap_or("record-test.mp4")),
         "reset" =>println!("removed {} pairing(s); restart the service", hap::reset(cfg.state_dir)),
         "serve" => {
             let protect = cfg.protect.as_ref().map(|p| {
@@ -125,11 +132,16 @@ fn main() {
                 log("no snapshot_url or [protect]: no snapshots (blank tiles)".into());
             }
             let motion_state = cfg.motion.unwrap_or(protect.is_some()).then(|| Arc::new(std::sync::atomic::AtomicBool::new(false)));
+            let hksv = (cfg.hksv.unwrap_or(motion_state.is_some()) && motion_state.is_some())
+                .then(|| cfg.rtsp.pick(2000).map(|(_, u)| u.to_string()))
+                .flatten()
+                .map(|url| hksv::Hksv::new(cfg.doorbell, cfg.state_dir.clone(), url).unwrap_or_else(|e| die(e)));
             let cam = Arc::new(
                 camera::Camera::new(&cfg.name, cfg.doorbell, cfg.rtsp.clone(), protect.clone())
                     .with_info(cfg.manufacturer.clone(), cfg.model.clone())
                     .with_snapshots(snapshots.clone())
-                    .with_motion(motion_state.clone()),
+                    .with_motion(motion_state.clone())
+                    .with_hksv(hksv.clone()),
             );
             let server = hap::Server::start(cam, cfg.hap_port, cfg.state_dir).unwrap_or_else(|e| die(e));
             let motion = motion_state.map(|st| events::Motion::new(camera::MOTION_DETECTED, st, std::time::Duration::from_secs(cfg.motion_hold)));
@@ -184,6 +196,26 @@ fn follow_protect(p: Arc<protect::Protect>, kind: protect::MotionKind, ev: Arc<e
 fn rtsp_host(ch: &stream::Channels) -> Option<String> {
     let url = ch.low.as_ref().or(ch.medium.as_ref()).or(ch.high.as_ref())?;
     Some(url.strip_prefix("rtsp://")?.split(['/', ':']).next()?.to_string())
+}
+
+/// `record-test <config> <out.mp4>`: what HKSV would get: 4 s prebuffer + ~8 s live, as fMP4.
+fn record_test(ch: &stream::Channels, out: &str) {
+    let url = ch.pick(2000).map(|(_, u)| u.to_string()).unwrap_or_else(|| die("no RTSP URL".into()));
+    let r = recording::Recorder::new(url);
+    r.enabled.store(true, std::sync::atomic::Ordering::Relaxed);
+    std::thread::sleep(std::time::Duration::from_secs(6));
+    let (init, frags) = r.start().unwrap_or_else(|e| die(e));
+    let mut file = init;
+    let t0 = std::time::Instant::now();
+    let mut n = 0;
+    while t0.elapsed().as_secs() < 8 {
+        if let Ok(f) = frags.recv_timeout(std::time::Duration::from_secs(5)) {
+            file.extend(f);
+            n += 1;
+        }
+    }
+    std::fs::write(out, &file).unwrap_or_else(|e| die(e.to_string()));
+    println!("{out}: {n} fragments, {} bytes", file.len());
 }
 
 /// `probe`: pull ~3 s from each configured channel and count what arrives (no secrets printed).

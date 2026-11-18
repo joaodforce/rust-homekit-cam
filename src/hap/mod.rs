@@ -41,6 +41,8 @@ pub struct Conn {
     pub id: u64,
     pub peer: IpAddr,
     pub local: IpAddr,
+    /// the pair-verify shared secret of this session (keys HomeKit Data Stream)
+    pub secret: [u8; 32],
 }
 
 /// The attribute database and its behaviour. Instance ids are per accessory (aid 1).
@@ -192,7 +194,7 @@ impl Server {
             v4 => v4,
         };
         let (Ok(peer), Ok(local)) = (stream.peer_addr(), stream.local_addr()) else { return };
-        let conn = Conn { id: n, peer: unmap(peer.ip()), local: unmap(local.ip()) };
+        let mut conn = Conn { id: n, peer: unmap(peer.ip()), local: unmap(local.ip()), secret: [0; 32] };
         let (Ok(read_half), Ok(spare)) = (stream.try_clone(), stream.try_clone()) else { return };
         let (read_slot, write_slot): (Slot, Slot) = Default::default();
         let mut reader = BufReader::new(SecureReader::new(read_half, read_slot.clone()));
@@ -260,6 +262,7 @@ impl Server {
                 break;
             }
             if let Some(shared) = encrypt_with {
+                conn.secret = shared;
                 let (r, w) = crypto::control_ciphers(&shared);
                 *read_slot.lock().unwrap() = Some(r);
                 *write_slot.lock().unwrap() = Some(w);

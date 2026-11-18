@@ -68,6 +68,8 @@ pub struct Camera {
     snapshots: Option<Arc<crate::snapshot::Snapshots>>,
     /// Motion Sensor service, when there is a motion source
     motion: Option<Arc<std::sync::atomic::AtomicBool>>,
+    /// HomeKit Secure Video services, when enabled
+    hksv: Option<Arc<crate::hksv::Hksv>>,
     streams: Mutex<HashMap<Vec<u8>, stream::Handle>>,
 }
 
@@ -85,8 +87,14 @@ impl Camera {
             protect,
             snapshots: None,
             motion: None,
+            hksv: None,
             streams: Mutex::new(HashMap::new()),
         }
+    }
+
+    pub fn with_hksv(mut self, h: Option<Arc<crate::hksv::Hksv>>) -> Self {
+        self.hksv = h;
+        self
     }
 
     pub fn with_motion(mut self, state: Option<Arc<std::sync::atomic::AtomicBool>>) -> Self {
@@ -306,6 +314,9 @@ impl Accessory for Camera {
                 ch(42, "23", "string", PR, json!({"value": self.name})),
             ]}));
         }
+        if let Some(h) = &self.hksv {
+            list.extend(h.services());
+        }
         if self.motion.is_some() {
             list.push(json!({"iid": 50, "type": "85", "characteristics": [
                 ch(MOTION_DETECTED, "22", "bool", PR_EV, json!({})),
@@ -317,7 +328,7 @@ impl Accessory for Camera {
             for c in s["characteristics"].as_array_mut().unwrap() {
                 let iid = c["iid"].as_u64().unwrap();
                 if c.get("value").is_none() && c["perms"].as_array().unwrap().iter().any(|p| p == "pr") {
-                    if let Ok(v) = self.read(Conn { id: 0, peer: [0, 0, 0, 0].into(), local: [0, 0, 0, 0].into() }, iid) {
+                    if let Ok(v) = self.read(Conn { id: 0, peer: [0, 0, 0, 0].into(), local: [0, 0, 0, 0].into(), secret: [0; 32] }, iid) {
                         c["value"] = v;
                     }
                 }
@@ -327,6 +338,9 @@ impl Accessory for Camera {
     }
 
     fn read(&self, conn: Conn, iid: u64) -> Result<Value, i64> {
+        if let (Some(h), true) = (&self.hksv, crate::hksv::Hksv::handles(iid)) {
+            return h.read(iid);
+        }
         let m = *self.muted.lock().unwrap();
         Ok(match iid {
             11 => json!(Self::supported_video().base64()),
@@ -349,6 +363,9 @@ impl Accessory for Camera {
     }
 
     fn write(&self, conn: Conn, iid: u64, value: &Value) -> Result<Option<Value>, i64> {
+        if let (Some(h), true) = (&self.hksv, crate::hksv::Hksv::handles(iid)) {
+            return h.write(conn, iid, value);
+        }
         let tlv_in = || value.as_str().and_then(tlv::unb64).ok_or(BAD_VALUE);
         match iid {
             2 => {
@@ -397,7 +414,7 @@ mod tests {
     use super::*;
 
     fn conn() -> Conn {
-        Conn { id: 1, peer: [127, 0, 0, 1].into(), local: [127, 0, 0, 1].into() }
+        Conn { id: 1, peer: [127, 0, 0, 1].into(), local: [127, 0, 0, 1].into(), secret: [0; 32] }
     }
 
     #[test]

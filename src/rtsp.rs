@@ -14,6 +14,10 @@ pub struct Track {
     pub clock: u32,
     /// H.264: SPS and PPS from `sprop-parameter-sets`
     pub params: Vec<Vec<u8>>,
+    /// channels from a=rtpmap (audio)
+    pub channels: u8,
+    /// the a=fmtp parameters, lower-case keys ("config", "sizelength", …)
+    pub fmtp: Vec<(String, String)>,
 }
 
 pub struct Client {
@@ -227,7 +231,7 @@ fn parse_sdp(sdp: &str, base: &str) -> Vec<Track> {
     for line in sdp.lines().map(str::trim) {
         if let Some(m) = line.strip_prefix("m=") {
             let pt = m.split_whitespace().nth(3).and_then(|p| p.parse().ok()).unwrap_or(0);
-            tracks.push(Track { control: base.to_string(), codec: String::new(), payload_type: pt, clock: 90000, params: vec![] });
+            tracks.push(Track { control: base.to_string(), codec: String::new(), payload_type: pt, clock: 90000, params: vec![], channels: 1, fmtp: vec![] });
         }
         let Some(t) = tracks.last_mut() else { continue };
         if let Some(c) = line.strip_prefix("a=control:") {
@@ -237,9 +241,14 @@ fn parse_sdp(sdp: &str, base: &str) -> Vec<Track> {
                 let mut p = enc.split('/');
                 t.codec = p.next().unwrap_or("").to_ascii_lowercase();
                 t.clock = p.next().and_then(|c| c.parse().ok()).unwrap_or(90000);
+                t.channels = p.next().and_then(|c| c.parse().ok()).unwrap_or(1);
             }
         } else if let Some(f) = line.strip_prefix("a=fmtp:") {
+            let f = f.split_once(' ').map(|(_, rest)| rest).unwrap_or(f);
             for kv in f.split(';') {
+                if let Some((k, v)) = kv.trim().split_once('=') {
+                    t.fmtp.push((k.trim().to_ascii_lowercase(), v.trim().to_string()));
+                }
                 if let Some(v) = kv.trim().strip_prefix("sprop-parameter-sets=") {
                     t.params = v.split(',').filter_map(crate::tlv::unb64).filter(|p| !p.is_empty()).collect();
                 }
