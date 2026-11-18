@@ -7,7 +7,12 @@ doorbell = true                  # false: a plain camera
 hap_port = 51830
 state_dir = "/var/lib/rust-homekit-cam"
 
-# Rings arrive as POST /ring with "Authorization: Bearer <ring_token>" (from HA, a webhook…).
+# Motion Sensor (needed for HomeKit Secure Video later): default on with [protect];
+# set motion = true to feed it with POST /motion. Off motion_hold seconds after the last trigger.
+# motion = true
+# motion_hold = 10
+
+# Rings and motion arrive as POST /ring, POST /motion with "Authorization: Bearer <ring_token>" (from HA, a webhook…).
 ring_listen = "0.0.0.0:8780"
 ring_token = "change-me"
 
@@ -27,7 +32,7 @@ low = "rtsp://user:password@192.0.2.10:554/stream2"      # sub stream
 # RTSP: Protect → camera → Settings → Advanced → RTSP; plain rtsp://<console>:7447/<alias>,
 # no credentials (the alias is the secret); high/medium/low = the camera's three channels.
 #
-# Two-way audio and snapshots: an API key (UniFi OS → Settings → Control Plane → Integrations), the camera's
+# Two-way audio, snapshots, rings and motion: an API key (UniFi OS → Settings → Control Plane → Integrations), the camera's
 # id, and the console's certificate fingerprint (logged on first use if unset). The service
 # host must reach the camera on UDP 7004 (mind camera-VLAN firewall rules).
 # [protect]
@@ -35,3 +40,4 @@ low = "rtsp://user:password@192.0.2.10:554/stream2"      # sub stream
 # camera_id = "…"
 # host = "192.0.2.1"            # default: the RTSP host
 # cert_sha256 = "AB:CD:…"
+# motion = "smart"              # "smart": person/vehicle/animal/package; "any": all motion

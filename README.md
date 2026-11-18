@@ -12,7 +12,8 @@ vendor-specific extras (UniFi Protect today) are optional backends:
 | Live video | ✓ (one URL, or up to three by bitrate) | ✓ (High / Medium / Low channels) |
 | Camera audio | ✓ if the camera streams Opus | ✓ (Protect adds an Opus track) |
 | Two-way audio | not yet (RTSP back-channel / ONVIF planned) | ✓ (talk-back session, Opus passthrough) |
-| Doorbell ring | ✓ `POST /ring` from anything (HA, Node-RED, a webhook) | ✓ same |
+| Doorbell ring | ✓ `POST /ring` from anything (HA, Node-RED, a webhook) | ✓ Protect events, and `POST /ring` |
+| Motion sensor (motion notifications; HKSV trigger) | ✓ `POST /motion` from anything | ✓ Protect events (smart detections, or any motion) |
 | Snapshots (tiles, notifications) | ✓ from the camera's JPEG URL (`snapshot_url`) | ✓ from the Protect API |
 | RTSP login | Basic / Digest from `rtsp://user:pass@…` | not needed (alias URLs) |
 
@@ -35,8 +36,11 @@ One HAP accessory per camera; a doorbell is category 18 (Video Doorbell), a came
 Snapshots (`POST /resource`): the camera's or NVR's own JPEG, returned as is (no decoding),
 cached for 5 s against the Home app's polling and refreshed on a ring.
 
-Later: Motion Sensor (from the same pluggable event sources as the ring) and
-**HomeKit Secure Video**
+Motion Sensor: on with each motion trigger, off `motion_hold` seconds (default 10) after the
+last one. Protect events keep it on while a detection lasts. Rings from two sources within 3 s
+count once.
+
+Later: **HomeKit Secure Video**
 (Camera Operating Mode, Camera Event Recording Management, Data Stream: fMP4 fragments of the same
 H.264, still no transcoding).
 
@@ -87,9 +91,10 @@ iPhone / Home hub ──HAP (HTTP, ChaCha20-Poly1305)──► rust-homekit-cam 
   talk-back backend gets it to the camera's speaker. Protect: the integration API opens a
   talk-back session (Opus over RTP straight to the camera, UDP 7004) and we forward the packets
   as they are. Other cameras: RTSP back-channel (ONVIF Profile T) is the likely next backend.
-- **Ring**: pluggable sources that all end in `Ringer::ring()`. Today: `POST /ring` with a bearer
-  token, from anything (Home Assistant, Node-RED, a Protect alarm-manager webhook…). Later
-  possibly vendor event feeds (Protect websocket, ONVIF events).
+- **Ring and motion**: pluggable sources that all end in `Events::ring()` / `Events::motion()`:
+  `POST /ring` / `POST /motion` with a bearer token from anything (Home Assistant, Node-RED,
+  webhooks…), and Protect's integration-API event stream (WebSocket, same API key and pinned
+  certificate). ONVIF events could follow for other cameras.
 
 ## Run
 
@@ -123,7 +128,8 @@ the camera, it does not relay.
 4. Two-way audio (Protect talk-back).
 5. Deploy as a service.
 6. Snapshots.
-7. Later: several cameras per process, RTSP back-channel talk-back, motion sensor,
+7. Motion sensor (Protect events, `POST /motion`).
+8. Later: several cameras per process, RTSP back-channel talk-back, motion sensor,
    HomeKit Secure Video, optional audio transcode for AAC-only cameras.
 
 ## License

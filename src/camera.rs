@@ -20,6 +20,7 @@ use std::net::UdpSocket;
 use std::sync::{Arc, Mutex};
 
 pub const SWITCH_EVENT: u64 = 41;
+pub const MOTION_DETECTED: u64 = 51;
 const SETUP_ENDPOINTS: u64 = 14;
 const SELECTED_CONFIG: u64 = 15;
 const STREAMING_STATUS: u64 = 16;
@@ -65,6 +66,8 @@ pub struct Camera {
     channels: Channels,
     protect: Option<Arc<crate::protect::Protect>>,
     snapshots: Option<Arc<crate::snapshot::Snapshots>>,
+    /// Motion Sensor service, when there is a motion source
+    motion: Option<Arc<std::sync::atomic::AtomicBool>>,
     streams: Mutex<HashMap<Vec<u8>, stream::Handle>>,
 }
 
@@ -81,8 +84,14 @@ impl Camera {
             channels,
             protect,
             snapshots: None,
+            motion: None,
             streams: Mutex::new(HashMap::new()),
         }
+    }
+
+    pub fn with_motion(mut self, state: Option<Arc<std::sync::atomic::AtomicBool>>) -> Self {
+        self.motion = state;
+        self
     }
 
     pub fn with_snapshots(mut self, s: Option<Arc<crate::snapshot::Snapshots>>) -> Self {
@@ -297,6 +306,12 @@ impl Accessory for Camera {
                 ch(42, "23", "string", PR, json!({"value": self.name})),
             ]}));
         }
+        if self.motion.is_some() {
+            list.push(json!({"iid": 50, "type": "85", "characteristics": [
+                ch(MOTION_DETECTED, "22", "bool", PR_EV, json!({})),
+                ch(52, "23", "string", PR, json!({"value": format!("{} Motion", self.name)})),
+            ]}));
+        }
         // fill in readable values
         for s in &mut list {
             for c in s["characteristics"].as_array_mut().unwrap() {
@@ -325,7 +340,10 @@ impl Accessory for Camera {
             31 => json!(m.1),
             32 => json!(m.2),
             SWITCH_EVENT if self.doorbell => Value::Null, // only meaningful as an event
-            3..=7 | 9 | 42 => return Err(NOT_READABLE), // static: served from the database
+            MOTION_DETECTED if self.motion.is_some() => {
+                json!(self.motion.as_ref().unwrap().load(std::sync::atomic::Ordering::SeqCst))
+            }
+            3..=7 | 9 | 42 | 52 => return Err(NOT_READABLE), // static: served from the database
             _ => return Err(NO_SUCH),
         })
     }
