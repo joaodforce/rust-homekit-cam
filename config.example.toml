@@ -1,0 +1,16 @@
+# Copy to /etc/rust-homekit-cam.toml (mode 0600). Never commit the real one: the RTSP alias
+# and the ring token are secrets.
+name = "Doorbell"
+doorbell = true
+hap_port = 51830
+state_dir = "/var/lib/rust-homekit-cam"
+
+# Rings arrive as POST /ring with "Authorization: Bearer <ring_token>".
+ring_listen = "0.0.0.0:8780"
+ring_token = "change-me"
+
+# Protect: Settings → camera → Advanced → RTSP. Plain RTSP (port 7447) on the LAN.
+[rtsp]
+high = "rtsp://192.0.2.1:7447/xxxxxxxxxxxxxxxx"
+medium = "rtsp://192.0.2.1:7447/yyyyyyyyyyyyyyyy"
+low = "rtsp://192.0.2.1:7447/zzzzzzzzzzzzzzzz"

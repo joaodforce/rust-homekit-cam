@@ -1,0 +1,353 @@
+//! A camera (optionally a video doorbell) as a HomeKit accessory.
+//!
+//! Services (instance ids):
+//! - Accessory Information [1]
+//! - Protocol Information [8]
+//! - Camera RTP Stream Management [10]: SupportedVideo/Audio/RTPConfiguration, SetupEndpoints,
+//!   SelectedRTPStreamConfiguration, StreamingStatus, Active
+//! - Microphone [20] (Mute), Speaker [30] (Mute, Volume)
+//! - Doorbell [40] (ProgrammableSwitchEvent), only when `doorbell` is set; primary then
+//!
+//! Live streaming is `crate::stream`'s job; this module speaks the TLVs.
+
+use crate::hap::{self, Accessory, BAD_VALUE, Conn, NO_SUCH, NOT_READABLE, READ_ONLY};
+use crate::tlv::{self, Tlv};
+use rand_core::{OsRng, RngCore};
+use serde_json::{Value, json};
+use std::collections::HashMap;
+use std::sync::Mutex;
+
+pub const SWITCH_EVENT: u64 = 41;
+const SETUP_ENDPOINTS: u64 = 14;
+const SELECTED_CONFIG: u64 = 15;
+const STREAMING_STATUS: u64 = 16;
+const STREAM_ACTIVE: u64 = 17;
+
+/// Codec numbers in the camera TLVs.
+const H264: u8 = 0;
+const OPUS: u8 = 3;
+const AAC_ELD: u8 = 2;
+
+/// One controller's negotiated stream (from SetupEndpoints), keyed by its session id.
+#[derive(Clone, Debug)]
+pub struct Endpoint {
+    pub session_id: Vec<u8>,
+    pub conn: u64,
+    pub controller: std::net::IpAddr,
+    pub video_port: u16,
+    pub audio_port: u16,
+    /// controller's SRTP key+salt: what it encrypts with (its talk-back audio)
+    pub video_srtp_in: Vec<u8>,
+    pub audio_srtp_in: Vec<u8>,
+    /// ours: what we encrypt the camera's video/audio with
+    pub video_srtp_out: Vec<u8>,
+    pub audio_srtp_out: Vec<u8>,
+    pub video_ssrc: u32,
+    pub audio_ssrc: u32,
+    pub local: std::net::IpAddr,
+}
+
+pub struct Camera {
+    name: String,
+    doorbell: bool,
+    /// per connection: the last SetupEndpoints answer (read back by controllers that don't use
+    /// write-responses)
+    setup_reply: Mutex<HashMap<u64, Vec<u8>>>,
+    endpoints: Mutex<HashMap<Vec<u8>, Endpoint>>,
+    muted: Mutex<(bool, bool, u8)>, // microphone, speaker, volume
+}
+
+impl Camera {
+    pub fn new(name: &str, doorbell: bool) -> Self {
+        Camera {
+            name: name.into(),
+            doorbell,
+            setup_reply: Mutex::new(HashMap::new()),
+            endpoints: Mutex::new(HashMap::new()),
+            muted: Mutex::new((false, false, 100)),
+        }
+    }
+
+    fn supported_video() -> Tlv {
+        // Advertised sizes: what the iPhone may ask for. We send the Protect channel that fits
+        // (the real size is in the SPS; iOS decodes whatever comes). Portrait sizes for the
+        // 3:4 doorbell are included.
+        let sizes: [(u16, u16); 12] = [
+            (1920, 1080), (1280, 720), (640, 360), (480, 270), (320, 180),
+            (1280, 960), (1024, 768), (640, 480), (480, 360), (320, 240),
+            (1080, 1440), (480, 640),
+        ];
+        let params = Tlv::new().u8(1, 0).u8(1, 1).u8(1, 2).u8(2, 0).u8(2, 1).u8(2, 2).u8(3, 0);
+        // attributes: repeated type-3 items, separated
+        let mut cfg = Tlv::new().u8(1, H264).tlv(2, params);
+        for (i, (w, h)) in sizes.iter().enumerate() {
+            if i > 0 {
+                cfg = cfg.sep();
+            }
+            cfg = cfg.tlv(3, Tlv::new().u16(1, *w).u16(2, *h).u8(3, 30));
+        }
+        Tlv::new().tlv(1, cfg)
+    }
+
+    fn supported_audio() -> Tlv {
+        // Opus 16/24 kHz mono, variable bitrate (Protect's own Opus track can pass through);
+        // AAC-ELD 16 kHz listed too so older controllers still negotiate.
+        let opus = |rate: u8| Tlv::new().u8(1, OPUS).tlv(2, Tlv::new().u8(1, 1).u8(2, 0).u8(3, rate));
+        Tlv::new()
+            .tlv(1, opus(1))
+            .sep()
+            .tlv(1, opus(2))
+            .sep()
+            .tlv(1, Tlv::new().u8(1, AAC_ELD).tlv(2, Tlv::new().u8(1, 1).u8(2, 0).u8(3, 1)))
+            .u8(2, 0) // no comfort noise
+    }
+
+    fn supported_rtp() -> Tlv {
+        Tlv::new().u8(2, 0) // AES_CM_128_HMAC_SHA1_80
+    }
+
+    /// SetupEndpoints write: remember the controller's side, answer with ours.
+    fn setup_endpoints(&self, conn: Conn, req: &[u8]) -> Result<Vec<u8>, i64> {
+        let items = tlv::parse(req);
+        let sid = tlv::get(&items, 1).ok_or(BAD_VALUE)?.to_vec();
+        let addr = tlv::parse(tlv::get(&items, 3).ok_or(BAD_VALUE)?);
+        let ip: std::net::IpAddr = std::str::from_utf8(tlv::get(&addr, 2).ok_or(BAD_VALUE)?)
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .ok_or(BAD_VALUE)?;
+        let srtp = |t| -> Result<Vec<u8>, i64> {
+            let p = tlv::parse(tlv::get(&items, t).ok_or(BAD_VALUE)?);
+            let mut k = tlv::get(&p, 2).ok_or(BAD_VALUE)?.to_vec();
+            k.extend_from_slice(tlv::get(&p, 3).ok_or(BAD_VALUE)?);
+            Ok(k)
+        };
+        let key = || {
+            let mut k = vec![0u8; 30];
+            OsRng.fill_bytes(&mut k);
+            k
+        };
+        let ep = Endpoint {
+            session_id: sid.clone(),
+            conn: conn.id,
+            controller: ip,
+            video_port: tlv::get_uint(&addr, 3).ok_or(BAD_VALUE)? as u16,
+            audio_port: tlv::get_uint(&addr, 4).ok_or(BAD_VALUE)? as u16,
+            video_srtp_in: srtp(4)?,
+            audio_srtp_in: srtp(5)?,
+            video_srtp_out: key(),
+            audio_srtp_out: key(),
+            video_ssrc: OsRng.next_u32(),
+            audio_ssrc: OsRng.next_u32(),
+            local: conn.local,
+        };
+        crate::log(format!("stream setup from {}: video :{}, audio :{}", ep.controller, ep.video_port, ep.audio_port));
+        let srtp_out = |k: &[u8]| Tlv::new().u8(1, 0).bytes(2, &k[..16]).bytes(3, &k[16..]);
+        // Our ports: for now the same numbers as the controller's; the stream module binds them.
+        let ours = Tlv::new()
+            .u8(1, if ep.local.is_ipv4() { 0 } else { 1 })
+            .bytes(2, ep.local.to_string().as_bytes())
+            .u16(3, ep.video_port)
+            .u16(4, ep.audio_port);
+        let reply = Tlv::new()
+            .bytes(1, &sid)
+            .u8(2, 0)
+            .tlv(3, ours)
+            .tlv(4, srtp_out(&ep.video_srtp_out))
+            .tlv(5, srtp_out(&ep.audio_srtp_out))
+            .u32(6, ep.video_ssrc)
+            .u32(7, ep.audio_ssrc)
+            .encode();
+        self.endpoints.lock().unwrap().insert(sid, ep);
+        Ok(reply)
+    }
+
+    /// SelectedRTPStreamConfiguration write: start / stop / reconfigure.
+    fn selected(&self, req: &[u8]) -> Result<(), i64> {
+        let items = tlv::parse(req);
+        let ctl = tlv::parse(tlv::get(&items, 1).ok_or(BAD_VALUE)?);
+        let sid = tlv::get(&ctl, 1).ok_or(BAD_VALUE)?.to_vec();
+        let command = tlv::get_uint(&ctl, 2).ok_or(BAD_VALUE)?;
+        let video = tlv::get(&items, 2).map(tlv::parse).unwrap_or_default();
+        let attrs = tlv::get(&video, 3).map(tlv::parse).unwrap_or_default();
+        let rtp = tlv::get(&video, 4).map(tlv::parse).unwrap_or_default();
+        let (w, h) = (tlv::get_uint(&attrs, 1).unwrap_or(0), tlv::get_uint(&attrs, 2).unwrap_or(0));
+        let (kbps, mtu) = (tlv::get_uint(&rtp, 3).unwrap_or(0), tlv::get_uint(&rtp, 5).unwrap_or(1378));
+        match command {
+            1 | 4 => crate::log(format!(
+                "stream {}: {w}x{h} ≤{kbps} kbps mtu {mtu} — live video not implemented yet",
+                if command == 1 { "start" } else { "reconfigure" }
+            )),
+            0 => {
+                crate::log("stream end".into());
+                self.endpoints.lock().unwrap().remove(&sid);
+            }
+            c => crate::log(format!("stream command {c}")),
+        }
+        Ok(())
+    }
+}
+
+const PR: &[&str] = &["pr"];
+const PW: &[&str] = &["pw"];
+const PR_EV: &[&str] = &["pr", "ev"];
+const PR_PW: &[&str] = &["pr", "pw"];
+const PR_PW_EV: &[&str] = &["pr", "pw", "ev"];
+
+fn ch(iid: u64, ty: &str, format: &str, perms: &[&str], extra: Value) -> Value {
+    let mut o = json!({"iid": iid, "type": ty, "format": format, "perms": perms});
+    if let Value::Object(m) = extra {
+        for (k, v) in m {
+            o[k] = v;
+        }
+    }
+    o
+}
+
+impl Accessory for Camera {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn category(&self) -> u64 {
+        if self.doorbell { hap::CATEGORY } else { 17 }
+    }
+
+    fn services(&self, serial: &str) -> Value {
+        let mut list = vec![
+            json!({"iid": 1, "type": "3E", "characteristics": [
+                ch(2, "14", "bool", PW, json!({})),
+                ch(3, "20", "string", PR, json!({"value": "Ubiquiti"})),
+                ch(4, "21", "string", PR, json!({"value": "UniFi Protect (rust-homekit-cam)"})),
+                ch(5, "23", "string", PR, json!({"value": self.name})),
+                ch(6, "30", "string", PR, json!({"value": serial})),
+                ch(7, "52", "string", PR, json!({"value": env!("CARGO_PKG_VERSION")})),
+            ]}),
+            json!({"iid": 8, "type": "A2", "characteristics": [ch(9, "37", "string", PR, json!({"value": "1.1.0"}))]}),
+            json!({"iid": 10, "type": "110", "characteristics": [
+                ch(11, "114", "tlv8", PR, json!({"value": Self::supported_video().base64()})),
+                ch(12, "115", "tlv8", PR, json!({"value": Self::supported_audio().base64()})),
+                ch(13, "116", "tlv8", PR, json!({"value": Self::supported_rtp().base64()})),
+                ch(SETUP_ENDPOINTS, "118", "tlv8", PR_PW, json!({})),
+                ch(SELECTED_CONFIG, "117", "tlv8", PR_PW, json!({})),
+                ch(STREAMING_STATUS, "120", "tlv8", PR_EV, json!({})),
+                ch(STREAM_ACTIVE, "B0", "uint8", PR_PW_EV, json!({"minValue": 0, "maxValue": 1, "minStep": 1})),
+            ]}),
+            json!({"iid": 20, "type": "112", "characteristics": [ch(21, "11A", "bool", PR_PW_EV, json!({}))]}),
+            json!({"iid": 30, "type": "113", "characteristics": [
+                ch(31, "11A", "bool", PR_PW_EV, json!({})),
+                ch(32, "119", "uint8", PR_PW_EV, json!({"minValue": 0, "maxValue": 100, "minStep": 1, "unit": "percentage"})),
+            ]}),
+        ];
+        if self.doorbell {
+            list.push(json!({"iid": 40, "type": "121", "primary": true, "characteristics": [
+                ch(SWITCH_EVENT, "73", "uint8", PR_EV, json!({"minValue": 0, "maxValue": 0, "validValues": [0]})),
+                ch(42, "23", "string", PR, json!({"value": self.name})),
+            ]}));
+        }
+        // fill in readable values
+        for s in &mut list {
+            for c in s["characteristics"].as_array_mut().unwrap() {
+                let iid = c["iid"].as_u64().unwrap();
+                if c.get("value").is_none() && c["perms"].as_array().unwrap().iter().any(|p| p == "pr") {
+                    if let Ok(v) = self.read(Conn { id: 0, peer: [0, 0, 0, 0].into(), local: [0, 0, 0, 0].into() }, iid) {
+                        c["value"] = v;
+                    }
+                }
+            }
+        }
+        Value::Array(list)
+    }
+
+    fn read(&self, conn: Conn, iid: u64) -> Result<Value, i64> {
+        let m = *self.muted.lock().unwrap();
+        Ok(match iid {
+            11 => json!(Self::supported_video().base64()),
+            12 => json!(Self::supported_audio().base64()),
+            13 => json!(Self::supported_rtp().base64()),
+            SETUP_ENDPOINTS => json!(tlv::b64(self.setup_reply.lock().unwrap().get(&conn.id).map(Vec::as_slice).unwrap_or(&[]))),
+            SELECTED_CONFIG => json!(""),
+            STREAMING_STATUS => json!(Tlv::new().u8(1, 0).base64()), // available
+            STREAM_ACTIVE => json!(1),
+            21 => json!(m.0),
+            31 => json!(m.1),
+            32 => json!(m.2),
+            SWITCH_EVENT if self.doorbell => Value::Null, // only meaningful as an event
+            3..=7 | 9 | 42 => return Err(NOT_READABLE), // static: served from the database
+            _ => return Err(NO_SUCH),
+        })
+    }
+
+    fn write(&self, conn: Conn, iid: u64, value: &Value) -> Result<Option<Value>, i64> {
+        let tlv_in = || value.as_str().and_then(tlv::unb64).ok_or(BAD_VALUE);
+        match iid {
+            2 => {
+                crate::log("identify".into());
+                Ok(None)
+            }
+            SETUP_ENDPOINTS => {
+                let reply = self.setup_endpoints(conn, &tlv_in()?)?;
+                let v = json!(tlv::b64(&reply));
+                self.setup_reply.lock().unwrap().insert(conn.id, reply);
+                Ok(Some(v))
+            }
+            SELECTED_CONFIG => self.selected(&tlv_in()?).map(|_| None),
+            STREAM_ACTIVE => Ok(None),
+            21 | 31 => {
+                let b = value.as_bool().or(value.as_u64().map(|v| v == 1)).ok_or(BAD_VALUE)?;
+                let mut m = self.muted.lock().unwrap();
+                if iid == 21 { m.0 = b } else { m.1 = b }
+                Ok(None)
+            }
+            32 => {
+                self.muted.lock().unwrap().2 = value.as_u64().ok_or(BAD_VALUE)?.min(100) as u8;
+                Ok(None)
+            }
+            _ => Err(READ_ONLY),
+        }
+    }
+
+    fn closed(&self, conn: Conn) {
+        self.setup_reply.lock().unwrap().remove(&conn.id);
+        self.endpoints.lock().unwrap().retain(|_, e| e.conn != conn.id);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn conn() -> Conn {
+        Conn { id: 1, peer: [10, 0, 0, 5].into(), local: [10, 0, 0, 9].into() }
+    }
+
+    #[test]
+    fn database_has_doorbell_and_camera() {
+        let cam = Camera::new("Doorbell", true);
+        let s = cam.services("AA:BB");
+        let types: Vec<&str> = s.as_array().unwrap().iter().map(|s| s["type"].as_str().unwrap()).collect();
+        assert_eq!(types, ["3E", "A2", "110", "112", "113", "121"]);
+        assert_eq!(cam.read(conn(), SWITCH_EVENT), Ok(Value::Null));
+        assert!(Camera::new("Cam", false).services("x").as_array().unwrap().len() == 5);
+    }
+
+    #[test]
+    fn setup_endpoints_answers_with_our_side() {
+        let cam = Camera::new("Doorbell", true);
+        let srtp = Tlv::new().u8(1, 0).bytes(2, &[1; 16]).bytes(3, &[2; 14]);
+        let req = Tlv::new()
+            .bytes(1, &[9; 16])
+            .tlv(3, Tlv::new().u8(1, 0).bytes(2, b"10.0.0.5").u16(3, 50000).u16(4, 50002))
+            .tlv(4, srtp)
+            .tlv(5, Tlv::new().u8(1, 0).bytes(2, &[3; 16]).bytes(3, &[4; 14]))
+            .base64();
+        let out = cam.write(conn(), SETUP_ENDPOINTS, &json!(req)).unwrap().unwrap();
+        let items = tlv::parse(&tlv::unb64(out.as_str().unwrap()).unwrap());
+        assert_eq!(tlv::get(&items, 1), Some(&[9u8; 16][..]));
+        assert_eq!(tlv::get_uint(&items, 2), Some(0));
+        let addr = tlv::parse(tlv::get(&items, 3).unwrap());
+        assert_eq!(tlv::get(&addr, 2), Some(&b"10.0.0.9"[..]));
+        let ep = cam.endpoints.lock().unwrap()[&vec![9u8; 16]].clone();
+        assert_eq!((ep.video_port, ep.audio_port, ep.video_srtp_in[0], ep.video_srtp_in[29]), (50000, 50002, 1, 2));
+        assert_eq!(cam.read(conn(), SETUP_ENDPOINTS).unwrap(), out);
+    }
+}
