@@ -28,7 +28,7 @@ const STREAM_ACTIVE: u64 = 17;
 /// Codec numbers in the camera TLVs.
 const H264: u8 = 0;
 const OPUS: u8 = 3;
-const AAC_ELD: u8 = 2;
+
 
 /// One controller's negotiated stream (from SetupEndpoints), keyed by its session id.
 #[derive(Clone, Debug)]
@@ -99,16 +99,10 @@ impl Camera {
     }
 
     fn supported_audio() -> Tlv {
-        // Opus 16/24 kHz mono, variable bitrate (Protect's own Opus track can pass through);
-        // AAC-ELD 16 kHz listed too so older controllers still negotiate.
+        // Opus only (16/24 kHz mono, variable bitrate): Protect's own Opus track passes through.
+        // AAC-ELD is not offered: iPhones prefer it when listed, and it would need a transcode.
         let opus = |rate: u8| Tlv::new().u8(1, OPUS).tlv(2, Tlv::new().u8(1, 1).u8(2, 0).u8(3, rate));
-        Tlv::new()
-            .tlv(1, opus(1))
-            .sep()
-            .tlv(1, opus(2))
-            .sep()
-            .tlv(1, Tlv::new().u8(1, AAC_ELD).tlv(2, Tlv::new().u8(1, 1).u8(2, 0).u8(3, 1)))
-            .u8(2, 0) // no comfort noise
+        Tlv::new().tlv(1, opus(2)).sep().tlv(1, opus(1)).u8(2, 0) // no comfort noise
     }
 
     fn supported_rtp() -> Tlv {
@@ -175,6 +169,20 @@ impl Camera {
         Ok(reply)
     }
 
+    /// The audio half of SelectedRTPStreamConfiguration; None unless Opus (and not muted).
+    fn selected_audio(items: &[(u8, Vec<u8>)], muted: bool) -> Option<stream::Audio> {
+        let raw = tlv::get(items, 3)?;
+        let a = tlv::parse(raw);
+        let codec = tlv::get_uint(&a, 1)?;
+        let params = tlv::get(&a, 2).map(tlv::parse).unwrap_or_default();
+        let rtp = tlv::get(&a, 3).map(tlv::parse).unwrap_or_default();
+        let rate = [8, 16, 24].get(tlv::get_uint(&params, 3).unwrap_or(9) as usize).copied().unwrap_or(0);
+        let ptime = tlv::get_uint(&params, 4).unwrap_or(0);
+        let pt = tlv::get_uint(&rtp, 1).unwrap_or(110) as u8;
+        crate::log(format!("audio selected: codec {codec} {rate} kHz, {ptime} ms packets, pt {pt}{}", if muted { " (muted)" } else { "" }));
+        (codec == OPUS as u64 && !muted).then_some(stream::Audio { pt, ptime: ptime as u32 })
+    }
+
     /// SelectedRTPStreamConfiguration write: start / stop / reconfigure.
     fn selected(&self, req: &[u8]) -> Result<(), i64> {
         let items = tlv::parse(req);
@@ -191,7 +199,8 @@ impl Camera {
             1 => {
                 crate::log(format!("stream start: {w}x{h} ≤{kbps} kbps mtu {mtu} pt {pt}"));
                 let ep = self.endpoints.lock().unwrap().get(&sid).cloned().ok_or(BAD_VALUE)?;
-                let req = stream::Request { pt, kbps, mtu: mtu as usize };
+                let audio = Self::selected_audio(&items, self.muted.lock().unwrap().0);
+                let req = stream::Request { pt, kbps, mtu: mtu as usize, audio };
                 match stream::start(ep, req, &self.channels) {
                     Ok(h) => {
                         self.streams.lock().unwrap().insert(sid, h);

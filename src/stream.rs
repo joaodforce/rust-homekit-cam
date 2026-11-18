@@ -42,6 +42,55 @@ pub struct Request {
     pub pt: u8,
     pub kbps: u64,
     pub mtu: usize,
+    pub audio: Option<Audio>,
+}
+
+/// Camera audio for the controller (Opus, passed through).
+pub struct Audio {
+    pub pt: u8,
+    /// requested packet time, ms (informational: Protect's own framing is sent as is)
+    pub ptime: u32,
+}
+
+/// Rewrites an incoming RTP packet's header for our stream: PT, SSRC, own seq, offset ts.
+struct Rewriter {
+    pt: u8,
+    ssrc: u32,
+    seq: u16,
+    ts_offset: u32,
+    pub last_ts: u32,
+}
+
+impl Rewriter {
+    fn new(pt: u8, ssrc: u32) -> Self {
+        Rewriter { pt, ssrc, seq: OsRng.next_u32() as u16, ts_offset: OsRng.next_u32(), last_ts: 0 }
+    }
+
+    fn rewrite(&mut self, pkt: &[u8]) -> Option<Vec<u8>> {
+        if pkt.len() < 13 || pkt[0] >> 6 != 2 {
+            return None;
+        }
+        let mut off = 12 + 4 * (pkt[0] & 0x0f) as usize;
+        if pkt[0] & 0x10 != 0 && pkt.len() >= off + 4 {
+            off += 4 + 4 * u16::from_be_bytes([pkt[off + 2], pkt[off + 3]]) as usize;
+        }
+        let mut end = pkt.len();
+        if pkt[0] & 0x20 != 0 {
+            end = end.saturating_sub(*pkt.last()? as usize);
+        }
+        if off >= end {
+            return None;
+        }
+        let ts = u32::from_be_bytes(pkt[4..8].try_into().ok()?).wrapping_add(self.ts_offset);
+        self.last_ts = ts;
+        let mut out = vec![0x80, self.pt | (pkt[1] & 0x80)];
+        out.extend_from_slice(&self.seq.to_be_bytes());
+        out.extend_from_slice(&ts.to_be_bytes());
+        out.extend_from_slice(&self.ssrc.to_be_bytes());
+        out.extend_from_slice(&pkt[off..end]);
+        self.seq = self.seq.wrapping_add(1);
+        Some(out)
+    }
 }
 
 pub struct Handle {
@@ -109,7 +158,17 @@ fn run(ep: &Endpoint, req: &Request, url: &str, stop: &AtomicBool, conn: &Mutex<
     *conn.lock().unwrap() = client.stream();
     let video = tracks.iter().find(|t| t.codec == "h264").ok_or("no H.264 track (is the camera on H.265?)")?;
     client.setup(video, 0)?;
+    // camera audio: Protect's Opus track on channel 2
+    let opus = req.audio.as_ref().and(tracks.iter().find(|t| t.codec == "opus"));
+    if let Some(t) = opus {
+        client.setup(t, 2)?;
+    } else if req.audio.is_some() {
+        crate::log("stream: no Opus track from Protect, video only".into());
+    }
     client.play()?;
+    let audio_dest = SocketAddr::new(ep.controller, ep.audio_port);
+    let mut audio = opus.and(req.audio.as_ref()).map(|a| (Rewriter::new(a.pt, ep.audio_ssrc), srtp::Sender::new(&ep.audio_srtp_out)));
+    let (mut a_count, mut a_octets, mut a_logged) = (0u32, 0u32, false);
 
     let dest = SocketAddr::new(ep.controller, ep.video_port);
     let mut srtp = srtp::Sender::new(&ep.video_srtp_out);
@@ -123,6 +182,21 @@ fn run(ep: &Endpoint, req: &Request, url: &str, stop: &AtomicBool, conn: &Mutex<
 
     while !stop.load(Ordering::Relaxed) {
         let (ch, data) = client.next()?;
+        if ch == 2 {
+            if let Some((rw, sr)) = &mut audio {
+                if let Some(p) = rw.rewrite(&data) {
+                    if !a_logged {
+                        a_logged = true;
+                        let toc = p[12];
+                        crate::log(format!("stream: audio flowing, Opus config {} stereo {} ({} bytes)", toc >> 3, toc >> 2 & 1, p.len() - 12));
+                    }
+                    a_count = a_count.wrapping_add(1);
+                    a_octets = a_octets.wrapping_add((p.len() - 12) as u32);
+                    let _ = ep.audio_sock.send_to(&sr.protect_rtp(&p), audio_dest);
+                }
+            }
+            continue;
+        }
         if ch != 0 {
             continue;
         }
@@ -139,6 +213,11 @@ fn run(ep: &Endpoint, req: &Request, url: &str, stop: &AtomicBool, conn: &Mutex<
         if first_ts.is_some() && last_sr.elapsed() > Duration::from_millis(500) {
             last_sr = Instant::now();
             let _ = ep.video_sock.send_to(&srtp.protect_rtcp(&sender_report(ep.video_ssrc, pack.last_ts, count, octets)), dest);
+            if let Some((rw, sr)) = &mut audio {
+                if a_count > 0 {
+                    let _ = ep.audio_sock.send_to(&sr.protect_rtcp(&sender_report(ep.audio_ssrc, rw.last_ts, a_count, a_octets)), audio_dest);
+                }
+            }
         }
         if count > 0 && count % 2000 == 0 {
             crate::log(format!("stream: {count} packets in {:.0} s", started.elapsed().as_secs_f32()));
@@ -176,5 +255,8 @@ mod tests {
         let only_high = Channels { high: Some("h".into()), ..Default::default() };
         assert_eq!(only_high.pick(100).unwrap().0, "high");
         assert_eq!(sender_report(1, 2, 3, 4).len(), 28);
+        let mut rw = Rewriter::new(110, 0x11223344);
+        let out = rw.rewrite(&[0x80, 0x80 | 96, 0, 5, 0, 0, 0, 10, 9, 9, 9, 9, 0xfc, 1, 2]).unwrap();
+        assert_eq!((out[1], &out[8..12], &out[12..]), (0x80 | 110, &[0x11, 0x22, 0x33, 0x44][..], &[0xfc, 1, 2][..]));
     }
 }

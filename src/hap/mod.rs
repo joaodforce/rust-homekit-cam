@@ -24,7 +24,6 @@ use std::io::BufReader;
 use std::net::{IpAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 /// Video doorbell. (Cameras are 17.)
 pub const CATEGORY: u64 = 18;
@@ -159,24 +158,25 @@ impl Server {
         .into_iter()
         .map(|(k, v)| (k.to_string(), v))
         .collect();
+        // One daemon for the process; re-registering the same name updates the TXT record in
+        // place (no goodbye packets, which can leave a controller unable to find us right
+        // after pair-setup).
         let mut adv = self.0.advert.lock().unwrap();
-        if let Some(old) = adv.take() {
-            let _ = old.shutdown();
-            std::thread::sleep(Duration::from_millis(200));
-        }
         let port = self.0.port;
         let host = format!("{}.local.", st.device_id.replace(':', ""));
-        let result = (|| -> Result<mdns_sd::ServiceDaemon, String> {
-            let d = mdns_sd::ServiceDaemon::new().map_err(|e| e.to_string())?;
-            d.disable_interface(mdns_sd::IfKind::IPv6).map_err(|e| e.to_string())?;
+        let result = (|| -> Result<(), String> {
+            if adv.is_none() {
+                let d = mdns_sd::ServiceDaemon::new().map_err(|e| e.to_string())?;
+                d.disable_interface(mdns_sd::IfKind::IPv6).map_err(|e| e.to_string())?;
+                *adv = Some(d);
+            }
             let info = mdns_sd::ServiceInfo::new("_hap._tcp.local.", &name, &host, "", port, txt)
                 .map_err(|e| e.to_string())?
                 .enable_addr_auto();
-            d.register(info).map_err(|e| e.to_string())?;
-            Ok(d)
+            adv.as_ref().unwrap().register(info).map_err(|e| e.to_string())
         })();
         match result {
-            Ok(d) => *adv = Some(d),
+            Ok(()) => log(format!("advertised (c#={cn}, sf={})", if st.paired() { 0 } else { 1 })),
             Err(e) => log(format!("mdns: {e}")),
         }
     }

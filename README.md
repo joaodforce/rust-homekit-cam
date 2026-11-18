@@ -4,7 +4,8 @@ A small Rust service that puts a UniFi Protect **doorbell** (and later, regular 
 Home as a native HomeKit accessory: ring notifications, live video and audio, two-way audio —
 **without video transcoding**. One static binary, no Node, no ffmpeg for the video path.
 
-Status: early. Pairing, the doorbell ring and the camera handshake are in; live view is next.
+Status: early. Pairing, the doorbell ring, live video and camera audio work (tested with a
+Doorbell Lite and an iPhone). Two-way audio is next.
 
 ## What it exposes
 
@@ -56,8 +57,10 @@ iPhone / Home hub ──HAP (HTTP, ChaCha20-Poly1305)──► rust-homekit-cam 
   The advertised sizes are only what the iPhone may ask for; it decodes the real size from the
   SPS (as Scrypted's "copy" mode does).
 - **Audio**: Protect's RTSP carries an **Opus** track next to AAC, and HomeKit accepts Opus, so
-  camera audio is passed through (repacketized, not transcoded). AAC-ELD stays listed for older
-  controllers.
+  camera audio is passed through (only the RTP header is rewritten). Only Opus is offered:
+  with AAC-ELD listed the iPhone picks AAC-ELD. iOS keeps the audio configuration it saw when
+  the accessory was added, so after changing the offer the accessory has to be removed and
+  added again.
 - **Two-way audio**: the iPhone sends its microphone as SRTP (Opus) to our audio port; we forward
   it to the camera's speaker through a Protect talk-back session (Opus where the camera supports
   it, otherwise an audio-only transcode).
@@ -76,6 +79,8 @@ rust-homekit-cam reset /etc/rust-homekit-cam.toml   # forget all controllers
 ```
 
 Home app → + → Add Accessory → More options… → the camera's name → setup code.
+If adding hangs at "Adding to Home…", the iPhone may now hide that accessory id: stop the
+service, move `state_dir` away (new id and code) and add it again.
 Test a ring: `curl -X POST -H "Authorization: Bearer <token>" http://<host>:8780/ring`.
 
 The config holds secrets (RTSP alias, ring token): never commit it. State (setup code, pairings,
