@@ -35,7 +35,7 @@ rustup's toolchain ahead of Homebrew's Rust.
 | `src/rtsp.rs`, `src/h264.rs` | RTSP client (Basic/Digest), H.264 RTP depacketizing / packetizing |
 | `src/srtp.rs` | SRTP/SRTCP sender and receiver |
 | `src/hksv.rs`, `src/recording.rs`, `src/mp4.rs`, `src/hds.rs` | HomeKit Secure Video: services, prebuffer, fMP4, HomeKit Data Stream |
-| `src/events.rs`, `src/protect.rs` | rings and motion; UniFi Protect integration API |
+| `src/events.rs`, `src/protect.rs`, `src/onvif.rs` | rings and motion; UniFi Protect integration API; ONVIF (SOAP, events, discovery) |
 | `src/snapshot.rs`, `src/httpc.rs` | snapshots; small HTTP client |
 | `deploy/rust-homekit-cam@.service` | systemd template unit, one instance per camera |
 

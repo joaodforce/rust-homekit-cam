@@ -5,20 +5,21 @@ notifications, live video and audio, two-way audio, snapshots, motion and **Home
 Video**. Video is **never transcoded**. Each camera runs as one small static binary (~2 MB):
 no Node, no ffmpeg, no Docker.
 
-It works with any camera that serves **H.264 over RTSP**. UniFi Protect gets extras through an
-optional backend:
+It works with any camera that serves **H.264 over RTSP**. ONVIF cameras and UniFi Protect get
+extras through optional backends:
 
-| Feature | Any H.264 RTSP camera | UniFi Protect |
-|---|---|---|
-| Live video (LAN and remote) | ✓ one URL, or up to three picked by bitrate | ✓ High / Medium / Low channels |
-| Camera audio | ✓ if the camera streams Opus | ✓ Protect's Opus track |
-| Two-way audio | – (planned: RTSP back-channel) | ✓ talk-back session |
-| Doorbell ring | ✓ `POST /ring` from anything (HA, Node-RED…) | ✓ from Protect's events |
-| Motion sensor | ✓ `POST /motion` from anything | ✓ from Protect's smart detections |
-| HomeKit Secure Video | ✓ (audio if the camera has AAC) | ✓ |
-| Snapshots | ✓ from the camera's JPEG URL | ✓ from the Protect API |
+| Feature | Any H.264 RTSP camera | ONVIF | UniFi Protect |
+|---|---|---|---|
+| Live video (LAN and remote) | ✓ up to three streams, picked by bitrate | ✓ streams found automatically | ✓ High / Medium / Low |
+| Camera audio | ✓ if the stream has Opus | ✓ if the stream has Opus | ✓ |
+| Two-way audio | – | – (needs decoding) | ✓ |
+| Doorbell ring | ✓ `POST /ring` | ✓ + event topics | ✓ from Protect |
+| Motion sensor | ✓ `POST /motion` | ✓ camera's motion events | ✓ smart detections |
+| HomeKit Secure Video | ✓ | ✓ | ✓ |
+| Snapshots | ✓ JPEG URL | ✓ ONVIF or JPEG URL | ✓ Protect API |
 
-Tested with a UniFi Protect Doorbell Lite, iPhones and home hubs, in a 256 MB Debian LXC.
+Any camera can be a doorbell (`doorbell = true`). Tested with a UniFi Protect Doorbell Lite and
+an Intelbras (Dahua) ONVIF camera, iPhones and home hubs, in a 256 MB Debian LXC.
 
 ## Requirements
 
@@ -47,9 +48,15 @@ cp config.example.toml /etc/rust-homekit-cam/frontdoor.toml
 chmod 600 /etc/rust-homekit-cam/frontdoor.toml
 ```
 
-Fill in the name and RTSP URL. UniFi Protect users: `rust-homekit-cam protect-cameras` prints a
-ready-made block for every camera (see [docs/unifi-protect.md](docs/unifi-protect.md)). For other
-cameras see [docs/generic-cameras.md](docs/generic-cameras.md). Every option is in
+Fill in the name and how to reach the camera:
+- **ONVIF cameras**: just the camera's address and login in `[onvif]`; `rust-homekit-cam
+  onvif-discover` finds them ([docs/onvif.md](docs/onvif.md)).
+- **UniFi Protect**: `rust-homekit-cam protect-cameras` prints a ready-made block for every
+  camera ([docs/unifi-protect.md](docs/unifi-protect.md)).
+- **Anything else**: the RTSP URL ([docs/generic-cameras.md](docs/generic-cameras.md)).
+
+Check it with `rust-homekit-cam probe <config>` (the streams) and `rust-homekit-cam snapshot
+<config> test.jpg`. Every option is in
 [docs/configuration.md](docs/configuration.md).
 
 **3. Start it.**
@@ -70,6 +77,7 @@ Each camera is its own process and its own accessory.
 ## Docs
 
 - [Configuration reference](docs/configuration.md)
+- [ONVIF cameras](docs/onvif.md): discovery, streams, snapshots and motion from ONVIF
 - [UniFi Protect](docs/unifi-protect.md): API key, camera setup helper, two-way audio, events
 - [Other cameras](docs/generic-cameras.md): RTSP and snapshot URLs, rings and motion from Home Assistant
 - [Troubleshooting](docs/troubleshooting.md)

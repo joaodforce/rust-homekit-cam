@@ -13,13 +13,13 @@ starting point.
 | `manufacturer`, `model` | `rust-homekit-cam`, `Video Doorbell` / `Camera` | Shown in the accessory details |
 | `hap_port` | `51830` | TCP port HomeKit talks to; **different for each camera** on one host |
 | `state_dir` | see below | Pairing identity, setup code, recording settings |
-| `motion` | on with `[protect]` | Adds the Motion Sensor (the trigger for HomeKit Secure Video); `true` to feed it with `POST /motion` |
+| `motion` | on with `[protect]` or `[onvif]` | Adds the Motion Sensor (the trigger for HomeKit Secure Video); `true` to feed it with `POST /motion` |
 | `motion_hold` | `10` | Seconds the sensor stays on after the last motion |
 | `hksv` | on with the Motion Sensor | HomeKit Secure Video services; `false` hides them |
 | `talkback` | `true` | `false` turns two-way audio off (e.g. when the camera's speaker misbehaves) |
 | `ring_listen` | none | `"0.0.0.0:8780"`: listen for the event endpoints below; a different port per camera |
 | `ring_token` | required with `ring_listen` | Bearer token for those requests |
-| `snapshot_url` | Protect's snapshot API with `[protect]` | `http://[user:pass@]host/path` returning a JPEG (Basic or Digest) |
+| `snapshot_url` | from `[protect]` or `[onvif]` | `http://[user:pass@]host/path` returning a JPEG (Basic or Digest); overrides the backends |
 
 `state_dir` defaults to systemd's `$STATE_DIRECTORY` (`/var/lib/rust-homekit-cam/<name>`) when
 run by the unit. Run from a shell (`code`, `reset`), it defaults to
@@ -38,6 +38,12 @@ special characters in the password (`@` → `%40`).
 
 Requirements: H.264 video. For camera audio in live view the stream needs an **Opus** track; for
 audio in recordings, an **AAC** track (`mpeg4-generic`). Without them you get video only.
+
+## `[onvif]`: ONVIF backend (optional)
+
+`url`, `user`, `password`, and optionally `motion_topics`, `ring_topics`, `snapshot`. Supplies
+the streams (when `[rtsp]` is empty), the snapshot URL and motion/ring events. See
+[onvif.md](onvif.md).
 
 ## `[protect]`: UniFi Protect backend (optional)
 
@@ -71,5 +77,8 @@ rust-homekit-cam code <config>             the setup code, and whether it is pai
 rust-homekit-cam reset <config>            forget all controllers (then restart the unit)
 rust-homekit-cam probe <config>            pull 3 s from each RTSP URL and report what arrives
 rust-homekit-cam record-test <config> <out.mp4>   ~12 s of what HomeKit Secure Video gets
+rust-homekit-cam snapshot <config> <out.jpg>      save the picture the Home app would get
 rust-homekit-cam protect-cameras <config>  list Protect cameras with config blocks to paste
+rust-homekit-cam onvif-info <config>       an ONVIF camera's profiles, URIs and 30 s of events
+rust-homekit-cam onvif-discover            ONVIF cameras on the LAN
 ```

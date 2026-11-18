@@ -1,6 +1,7 @@
 # Other cameras
 
-Any camera (or NVR) with an **H.264** RTSP stream works. What you get depends on the stream:
+Any camera (or NVR) with an **H.264** RTSP stream works. If it speaks ONVIF (most do), see
+[onvif.md](onvif.md) first: it finds the streams and motion events for you. What you get depends on the stream:
 
 | The camera has | You get |
 |---|---|
@@ -9,7 +10,8 @@ Any camera (or NVR) with an **H.264** RTSP stream works. What you get depends on
 | an AAC audio track | audio in recordings |
 | a JPEG snapshot URL | pictures in tiles and notifications |
 
-Two-way audio needs a vendor backend; only UniFi Protect has one so far.
+Two-way audio needs a vendor backend; only UniFi Protect has one so far (ONVIF back-channels
+usually need audio conversion, which isn't done).
 
 ## RTSP and snapshot URLs
 
