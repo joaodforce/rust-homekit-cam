@@ -15,7 +15,9 @@ use crate::tlv::{self, Tlv};
 use rand_core::{OsRng, RngCore};
 use serde_json::{Value, json};
 use std::collections::HashMap;
-use std::sync::Mutex;
+use crate::stream::{self, Channels};
+use std::net::UdpSocket;
+use std::sync::{Arc, Mutex};
 
 pub const SWITCH_EVENT: u64 = 41;
 const SETUP_ENDPOINTS: u64 = 14;
@@ -45,6 +47,9 @@ pub struct Endpoint {
     pub video_ssrc: u32,
     pub audio_ssrc: u32,
     pub local: std::net::IpAddr,
+    /// our UDP sockets (their ports go in the SetupEndpoints answer)
+    pub video_sock: Arc<UdpSocket>,
+    pub audio_sock: Arc<UdpSocket>,
 }
 
 pub struct Camera {
@@ -55,16 +60,20 @@ pub struct Camera {
     setup_reply: Mutex<HashMap<u64, Vec<u8>>>,
     endpoints: Mutex<HashMap<Vec<u8>, Endpoint>>,
     muted: Mutex<(bool, bool, u8)>, // microphone, speaker, volume
+    channels: Channels,
+    streams: Mutex<HashMap<Vec<u8>, stream::Handle>>,
 }
 
 impl Camera {
-    pub fn new(name: &str, doorbell: bool) -> Self {
+    pub fn new(name: &str, doorbell: bool, channels: Channels) -> Self {
         Camera {
             name: name.into(),
             doorbell,
             setup_reply: Mutex::new(HashMap::new()),
             endpoints: Mutex::new(HashMap::new()),
             muted: Mutex::new((false, false, 100)),
+            channels,
+            streams: Mutex::new(HashMap::new()),
         }
     }
 
@@ -126,6 +135,10 @@ impl Camera {
             OsRng.fill_bytes(&mut k);
             k
         };
+        let bind = |ip: std::net::IpAddr| UdpSocket::bind((ip, 0)).map(Arc::new).map_err(|_| BAD_VALUE);
+        let (video_sock, audio_sock) = (bind(conn.local)?, bind(conn.local)?);
+        let port = |s: &UdpSocket| s.local_addr().map(|a| a.port()).unwrap_or(0);
+        let (our_video, our_audio) = (port(&video_sock), port(&audio_sock));
         let ep = Endpoint {
             session_id: sid.clone(),
             conn: conn.id,
@@ -139,15 +152,16 @@ impl Camera {
             video_ssrc: OsRng.next_u32(),
             audio_ssrc: OsRng.next_u32(),
             local: conn.local,
+            video_sock,
+            audio_sock,
         };
         crate::log(format!("stream setup from {}: video :{}, audio :{}", ep.controller, ep.video_port, ep.audio_port));
         let srtp_out = |k: &[u8]| Tlv::new().u8(1, 0).bytes(2, &k[..16]).bytes(3, &k[16..]);
-        // Our ports: for now the same numbers as the controller's; the stream module binds them.
         let ours = Tlv::new()
             .u8(1, if ep.local.is_ipv4() { 0 } else { 1 })
             .bytes(2, ep.local.to_string().as_bytes())
-            .u16(3, ep.video_port)
-            .u16(4, ep.audio_port);
+            .u16(3, our_video)
+            .u16(4, our_audio);
         let reply = Tlv::new()
             .bytes(1, &sid)
             .u8(2, 0)
@@ -172,14 +186,24 @@ impl Camera {
         let rtp = tlv::get(&video, 4).map(tlv::parse).unwrap_or_default();
         let (w, h) = (tlv::get_uint(&attrs, 1).unwrap_or(0), tlv::get_uint(&attrs, 2).unwrap_or(0));
         let (kbps, mtu) = (tlv::get_uint(&rtp, 3).unwrap_or(0), tlv::get_uint(&rtp, 5).unwrap_or(1378));
+        let pt = tlv::get_uint(&rtp, 1).unwrap_or(99) as u8;
         match command {
-            1 | 4 => crate::log(format!(
-                "stream {}: {w}x{h} ≤{kbps} kbps mtu {mtu} — live video not implemented yet",
-                if command == 1 { "start" } else { "reconfigure" }
-            )),
+            1 => {
+                crate::log(format!("stream start: {w}x{h} ≤{kbps} kbps mtu {mtu} pt {pt}"));
+                let ep = self.endpoints.lock().unwrap().get(&sid).cloned().ok_or(BAD_VALUE)?;
+                let req = stream::Request { pt, kbps, mtu: mtu as usize };
+                match stream::start(ep, req, &self.channels) {
+                    Ok(h) => {
+                        self.streams.lock().unwrap().insert(sid, h);
+                    }
+                    Err(e) => crate::log(format!("stream start: {e}")),
+                }
+            }
+            4 => crate::log(format!("stream reconfigure: {w}x{h} ≤{kbps} kbps (kept the current channel)")),
             0 => {
                 crate::log("stream end".into());
                 self.endpoints.lock().unwrap().remove(&sid);
+                self.streams.lock().unwrap().remove(&sid);
             }
             c => crate::log(format!("stream command {c}")),
         }
@@ -308,7 +332,12 @@ impl Accessory for Camera {
 
     fn closed(&self, conn: Conn) {
         self.setup_reply.lock().unwrap().remove(&conn.id);
-        self.endpoints.lock().unwrap().retain(|_, e| e.conn != conn.id);
+        let gone: Vec<Vec<u8>> =
+            self.endpoints.lock().unwrap().iter().filter(|(_, e)| e.conn == conn.id).map(|(k, _)| k.clone()).collect();
+        for k in gone {
+            self.endpoints.lock().unwrap().remove(&k);
+            self.streams.lock().unwrap().remove(&k);
+        }
     }
 }
 
@@ -317,22 +346,22 @@ mod tests {
     use super::*;
 
     fn conn() -> Conn {
-        Conn { id: 1, peer: [10, 0, 0, 5].into(), local: [10, 0, 0, 9].into() }
+        Conn { id: 1, peer: [127, 0, 0, 1].into(), local: [127, 0, 0, 1].into() }
     }
 
     #[test]
     fn database_has_doorbell_and_camera() {
-        let cam = Camera::new("Doorbell", true);
+        let cam = Camera::new("Doorbell", true, Channels::default());
         let s = cam.services("AA:BB");
         let types: Vec<&str> = s.as_array().unwrap().iter().map(|s| s["type"].as_str().unwrap()).collect();
         assert_eq!(types, ["3E", "A2", "110", "112", "113", "121"]);
         assert_eq!(cam.read(conn(), SWITCH_EVENT), Ok(Value::Null));
-        assert!(Camera::new("Cam", false).services("x").as_array().unwrap().len() == 5);
+        assert!(Camera::new("Cam", false, Channels::default()).services("x").as_array().unwrap().len() == 5);
     }
 
     #[test]
     fn setup_endpoints_answers_with_our_side() {
-        let cam = Camera::new("Doorbell", true);
+        let cam = Camera::new("Doorbell", true, Channels::default());
         let srtp = Tlv::new().u8(1, 0).bytes(2, &[1; 16]).bytes(3, &[2; 14]);
         let req = Tlv::new()
             .bytes(1, &[9; 16])
@@ -345,7 +374,8 @@ mod tests {
         assert_eq!(tlv::get(&items, 1), Some(&[9u8; 16][..]));
         assert_eq!(tlv::get_uint(&items, 2), Some(0));
         let addr = tlv::parse(tlv::get(&items, 3).unwrap());
-        assert_eq!(tlv::get(&addr, 2), Some(&b"10.0.0.9"[..]));
+        assert_eq!(tlv::get(&addr, 2), Some(&b"127.0.0.1"[..]));
+        assert_ne!(tlv::get_uint(&addr, 3), Some(50000));
         let ep = cam.endpoints.lock().unwrap()[&vec![9u8; 16]].clone();
         assert_eq!((ep.video_port, ep.audio_port, ep.video_srtp_in[0], ep.video_srtp_in[29]), (50000, 50002, 1, 2));
         assert_eq!(cam.read(conn(), SETUP_ENDPOINTS).unwrap(), out);

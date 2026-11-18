@@ -3,8 +3,12 @@
 //! `rust-homekit-cam serve <config.toml>` | `code <config.toml>` | `reset <config.toml>`
 
 mod camera;
+mod h264;
 mod hap;
 mod ring;
+mod rtsp;
+mod srtp;
+mod stream;
 mod tlv;
 
 use serde::Deserialize;
@@ -29,18 +33,9 @@ struct Config {
     ring_listen: Option<String>,
     #[serde(default)]
     ring_token: String,
-    /// Protect RTSP URLs (rtsp://<nvr>:7447/<alias>) per channel; used for live view.
+    /// Protect RTSP URLs (rtsp://<nvr>:7447/<alias>) per channel, for live view.
     #[serde(default)]
-    #[allow(dead_code)]
-    rtsp: Rtsp,
-}
-
-#[derive(Deserialize, Default)]
-#[allow(dead_code)]
-struct Rtsp {
-    high: Option<String>,
-    medium: Option<String>,
-    low: Option<String>,
+    rtsp: stream::Channels,
 }
 
 fn yes() -> bool {
@@ -75,9 +70,10 @@ fn main() {
             let (code, paired) = hap::code(cfg.state_dir);
             println!("{code} ({})", if paired { "paired" } else { "not paired" });
         }
-        "reset" => println!("removed {} pairing(s); restart the service", hap::reset(cfg.state_dir)),
+        "probe" => probe(&cfg.rtsp),
+        "reset" =>println!("removed {} pairing(s); restart the service", hap::reset(cfg.state_dir)),
         "serve" => {
-            let cam = Arc::new(camera::Camera::new(&cfg.name, cfg.doorbell));
+            let cam = Arc::new(camera::Camera::new(&cfg.name, cfg.doorbell, cfg.rtsp.clone()));
             let server = hap::Server::start(cam, cfg.hap_port, cfg.state_dir).unwrap_or_else(|e| die(e));
             if let Some(listen) = &cfg.ring_listen {
                 if cfg.ring_token.is_empty() {
@@ -91,5 +87,34 @@ fn main() {
             }
         }
         c => die(format!("unknown command {c}")),
+    }
+}
+
+/// `probe`: pull ~3 s from each configured channel and count what arrives (no secrets printed).
+fn probe(ch: &stream::Channels) {
+    for (name, url) in [("high", &ch.high), ("medium", &ch.medium), ("low", &ch.low)] {
+        let Some(url) = url else { continue };
+        let r = (|| -> Result<String, String> {
+            let (mut c, tracks) = rtsp::Client::connect(url)?;
+            let codecs: Vec<String> = tracks.iter().map(|t| format!("{}/{}", t.codec, t.clock)).collect();
+            let v = tracks.iter().find(|t| t.codec == "h264").ok_or("no h264")?;
+            c.setup(v, 0)?;
+            c.play()?;
+            let mut d = h264::Depacketizer::default();
+            let (mut nals, mut types, mut max) = (Vec::new(), [0u32; 32], 0usize);
+            let t0 = std::time::Instant::now();
+            while t0.elapsed().as_secs() < 3 {
+                let (chn, p) = c.next()?;
+                if chn == 0 {
+                    max = max.max(p.len());
+                    d.push(&p, &mut nals);
+                }
+            }
+            for n in nals.drain(..) {
+                types[(n.data[0] & 0x1f) as usize] += 1;
+            }
+            Ok(format!("tracks {codecs:?}, sprop {}, max pkt {max}, NALs: idr {} non-idr {} sps {} pps {}", v.params.len(), types[5], types[1], types[7], types[8]))
+        })();
+        println!("{name}: {}", r.unwrap_or_else(|e| format!("error: {e}")));
     }
 }

@@ -1,0 +1,149 @@
+//! SRTP / SRTCP sender, AES_CM_128_HMAC_SHA1_80 only (RFC 3711), key derivation rate 0.
+
+use aes::Aes128;
+use ctr::cipher::{KeyIvInit, StreamCipher};
+use hmac::{Hmac, Mac};
+use sha1::Sha1;
+
+type Ctr = ctr::Ctr128BE<Aes128>;
+type HmacSha1 = Hmac<Sha1>;
+
+/// AES-CM keystream XOR with a 14-byte salt-derived IV (`iv` = 112 bits, counter in the low 16).
+fn aes_cm(key: &[u8; 16], iv14: &[u8; 14], data: &mut [u8]) {
+    let mut iv = [0u8; 16];
+    iv[..14].copy_from_slice(iv14);
+    Ctr::new(key.into(), &iv.into()).apply_keystream(data);
+}
+
+/// Session key derivation (RFC 3711 4.3.1) with kdr = 0.
+fn derive(master_key: &[u8; 16], master_salt: &[u8; 14], label: u8, out: &mut [u8]) {
+    let mut x = *master_salt;
+    x[7] ^= label;
+    out.iter_mut().for_each(|b| *b = 0);
+    aes_cm(master_key, &x, out);
+}
+
+struct Keys {
+    enc: [u8; 16],
+    auth: [u8; 20],
+    salt: [u8; 14],
+}
+
+impl Keys {
+    fn new(master: &[u8], base: u8) -> Keys {
+        let mk: [u8; 16] = master[..16].try_into().unwrap();
+        let ms: [u8; 14] = master[16..30].try_into().unwrap();
+        let mut k = Keys { enc: [0; 16], auth: [0; 20], salt: [0; 14] };
+        derive(&mk, &ms, base, &mut k.enc);
+        derive(&mk, &ms, base + 1, &mut k.auth);
+        derive(&mk, &ms, base + 2, &mut k.salt);
+        k
+    }
+
+    fn iv(&self, ssrc: u32, index: u64) -> [u8; 14] {
+        let mut iv = self.salt;
+        for (i, b) in ssrc.to_be_bytes().iter().enumerate() {
+            iv[4 + i] ^= b;
+        }
+        for (i, b) in index.to_be_bytes()[2..].iter().enumerate() {
+            iv[8 + i] ^= b;
+        }
+        iv
+    }
+
+    fn tag(&self, parts: &[&[u8]]) -> [u8; 10] {
+        let mut m = <HmacSha1 as Mac>::new_from_slice(&self.auth).unwrap();
+        for p in parts {
+            m.update(p);
+        }
+        m.finalize().into_bytes()[..10].try_into().unwrap()
+    }
+}
+
+/// Protects one sender's RTP and RTCP (a single SSRC).
+pub struct Sender {
+    rtp: Keys,
+    rtcp: Keys,
+    roc: u32,
+    last_seq: Option<u16>,
+    rtcp_index: u32,
+}
+
+impl Sender {
+    /// `master` = 16-byte master key + 14-byte master salt.
+    pub fn new(master: &[u8]) -> Sender {
+        Sender { rtp: Keys::new(master, 0), rtcp: Keys::new(master, 3), roc: 0, last_seq: None, rtcp_index: 0 }
+    }
+
+    /// RTP packet (12-byte header, no CSRCs/extension) → SRTP packet.
+    pub fn protect_rtp(&mut self, pkt: &[u8]) -> Vec<u8> {
+        let seq = u16::from_be_bytes([pkt[2], pkt[3]]);
+        let ssrc = u32::from_be_bytes(pkt[8..12].try_into().unwrap());
+        if self.last_seq.is_some_and(|l| seq < l && l - seq > 0x8000) {
+            self.roc = self.roc.wrapping_add(1);
+        }
+        self.last_seq = Some(seq);
+        let index = (self.roc as u64) << 16 | seq as u64;
+        let mut out = pkt.to_vec();
+        aes_cm(&self.rtp.enc, &self.rtp.iv(ssrc, index), &mut out[12..]);
+        let tag = self.rtp.tag(&[&out, &self.roc.to_be_bytes()]);
+        out.extend_from_slice(&tag);
+        out
+    }
+
+    /// RTCP compound packet → SRTCP (encrypted, E flag set).
+    pub fn protect_rtcp(&mut self, pkt: &[u8]) -> Vec<u8> {
+        let ssrc = u32::from_be_bytes(pkt[4..8].try_into().unwrap());
+        let index = self.rtcp_index;
+        self.rtcp_index = (self.rtcp_index + 1) & 0x7fff_ffff;
+        let mut out = pkt.to_vec();
+        aes_cm(&self.rtcp.enc, &self.rtcp.iv(ssrc, index as u64), &mut out[8..]);
+        out.extend_from_slice(&(0x8000_0000 | index).to_be_bytes());
+        let tag = self.rtcp.tag(&[&out]);
+        out.extend_from_slice(&tag);
+        out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn hex(s: &str) -> Vec<u8> {
+        (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
+    }
+
+    /// RFC 3711 appendix B.3.
+    #[test]
+    fn key_derivation_vectors() {
+        let mut master = hex("E1F97A0D3E018BE0D64FA32C06DE4139");
+        master.extend(hex("0EC675AD498AFEEBB6960B3AABE6"));
+        let k = Keys::new(&master, 0);
+        assert_eq!(k.enc.to_vec(), hex("C61E7A93744F39EE10734AFE3FF7A087"));
+        assert_eq!(k.salt.to_vec(), hex("30CBBC08863D8C85D49DB34A9AE1"));
+        assert_eq!(k.auth.to_vec(), hex("CEBE321F6FF7716B6FD4AB49AF256A156D38BAA4"));
+    }
+
+    /// RFC 3711 appendix B.2: AES-CM keystream.
+    #[test]
+    fn aes_cm_vector() {
+        let key: [u8; 16] = hex("2B7E151628AED2A6ABF7158809CF4F3C").try_into().unwrap();
+        let iv: [u8; 14] = hex("F0F1F2F3F4F5F6F7F8F9FAFBFCFD").try_into().unwrap();
+        let mut ks = [0u8; 32];
+        aes_cm(&key, &iv, &mut ks);
+        assert_eq!(ks.to_vec(), hex("E03EAD0935C95E80E166B16DD92B4EB4D23513162B02D0F72A43A2FE4A5F97AB"));
+    }
+
+    #[test]
+    fn rtp_grows_by_tag_and_rolls_over() {
+        let mut s = Sender::new(&[7u8; 30]);
+        let mut p = vec![0x80, 96, 0xff, 0xff, 0, 0, 0, 1, 1, 2, 3, 4, 9, 9, 9];
+        assert_eq!(s.protect_rtp(&p).len(), p.len() + 10);
+        p[2] = 0;
+        p[3] = 0;
+        s.protect_rtp(&p);
+        assert_eq!(s.roc, 1);
+        let sr = [0x80, 200, 0, 6, 1, 2, 3, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        assert_eq!(s.protect_rtcp(&sr).len(), sr.len() + 14);
+    }
+}

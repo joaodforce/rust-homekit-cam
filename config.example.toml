@@ -14,3 +14,4 @@ ring_token = "change-me"
 high = "rtsp://192.0.2.1:7447/xxxxxxxxxxxxxxxx"
 medium = "rtsp://192.0.2.1:7447/yyyyyyyyyyyyyyyy"
 low = "rtsp://192.0.2.1:7447/zzzzzzzzzzzzzzzz"
+# allow_high = true   # use High (10 Mbps) when the iPhone asks for ≥ 4 Mbps
