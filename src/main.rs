@@ -9,6 +9,7 @@ mod hap;
 mod hds;
 mod hksv;
 mod mp4;
+mod onvif;
 mod httpc;
 mod protect;
 mod recording;
@@ -25,6 +26,29 @@ use std::sync::Arc;
 
 pub fn log(msg: String) {
     eprintln!("homekit-cam: {msg}");
+}
+
+/// An ONVIF camera: where to find it and how to log in. It can supply the RTSP URLs (when
+/// [rtsp] is not set), the snapshot URL (when snapshot_url is not set) and motion/ring events.
+#[derive(Deserialize)]
+struct OnvifCfg {
+    /// http://<camera>[:port]
+    url: String,
+    user: String,
+    password: String,
+    /// events whose topic contains one of these turn the Motion Sensor on/off
+    #[serde(default = "motion_topics")]
+    motion_topics: Vec<String>,
+    /// events whose topic contains one of these (with a true value) ring the doorbell
+    #[serde(default)]
+    ring_topics: Vec<String>,
+    /// use the camera's ONVIF snapshot URI (false when it is broken: set snapshot_url instead)
+    #[serde(default = "yes")]
+    snapshot: bool,
+}
+
+fn motion_topics() -> Vec<String> {
+    vec!["Motion".into()]
 }
 
 /// Protect integration API: API key, camera id; the console's address (default: the RTSP
@@ -71,6 +95,8 @@ struct Config {
     ring_token: String,
     /// A JPEG snapshot URL (http://[user:pass@]host/path); default with [protect]: Protect's.
     snapshot_url: Option<String>,
+    /// Optional ONVIF backend
+    onvif: Option<OnvifCfg>,
     /// Optional UniFi Protect backend (two-way audio, snapshots).
     protect: Option<ProtectCfg>,
     /// Protect RTSP URLs (rtsp://<nvr>:7447/<alias>) per channel, for live view.
@@ -111,21 +137,30 @@ fn die(msg: String) -> ! {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("onvif-discover") {
+        for (url, scopes) in onvif::discover(std::time::Duration::from_secs(3)) {
+            let pick = |k: &str| scopes.split_whitespace().find_map(|s| s.split_once(&format!("/{k}/")).map(|(_, v)| v.replace("%20", " "))).unwrap_or_default();
+            println!("{url}  {} {}", pick("hardware"), pick("name"));
+        }
+        return;
+    }
     let (cmd, path) = match args.as_slice() {
         [_, c, p] | [_, c, p, _] => (c.as_str(), p.as_str()),
-        _ => die("usage: rust-homekit-cam serve|code|reset <config.toml>".into()),
+        _ => die("usage: rust-homekit-cam serve|code|reset|probe|record-test|protect-cameras|onvif-info <config.toml>, or onvif-discover".into()),
     };
-    let cfg = load(path);
+    let mut cfg = load(path);
     match cmd {
         "code" => {
             let (code, paired) = hap::code(cfg.state_dir.clone().unwrap());
             println!("{code} ({})", if paired { "paired" } else { "not paired" });
         }
         "probe" => probe(&cfg.rtsp),
+        "onvif-info" => onvif_info(&cfg),
         "protect-cameras" => protect_cameras(&cfg),
         "record-test" => record_test(&cfg.rtsp, args.get(3).map(String::as_str).unwrap_or("record-test.mp4")),
         "reset" =>println!("removed {} pairing(s); restart the service", hap::reset(cfg.state_dir.clone().unwrap())),
         "serve" => {
+            let onvif = cfg.onvif.as_ref().map(|o| connect_onvif(o, &mut cfg.rtsp));
             if cfg.protect.as_ref().is_some_and(|p| p.camera_id.is_empty()) {
                 die("[protect] camera_id is missing (rust-homekit-cam protect-cameras <config> lists them)".into());
             }
@@ -138,16 +173,18 @@ fn main() {
             } else if cfg.talkback == Some(false) {
                 log("talkback = false: two-way audio off".into());
             }
-            let snapshots = match (&cfg.snapshot_url, &protect) {
-                (Some(u), _) => Some(snapshot::Source::Url(u.clone())),
-                (None, Some(p)) => Some(snapshot::Source::Protect(p.clone())),
+            let onvif_snapshot = onvif.as_ref().and_then(|(_, snap)| snap.clone());
+            let snapshots = match (&cfg.snapshot_url, &protect, onvif_snapshot) {
+                (Some(u), _, _) => Some(snapshot::Source::Url(u.clone())),
+                (None, Some(p), _) => Some(snapshot::Source::Protect(p.clone())),
+                (None, None, Some(u)) => Some(snapshot::Source::Url(u)),
                 _ => None,
             }
             .map(|s| Arc::new(snapshot::Snapshots::new(s)));
             if snapshots.is_none() {
                 log("no snapshot_url or [protect]: no snapshots (blank tiles)".into());
             }
-            let motion_state = cfg.motion.unwrap_or(protect.is_some()).then(|| Arc::new(std::sync::atomic::AtomicBool::new(false)));
+            let motion_state = cfg.motion.unwrap_or(protect.is_some() || onvif.is_some()).then(|| Arc::new(std::sync::atomic::AtomicBool::new(false)));
             let hksv = (cfg.hksv.unwrap_or(motion_state.is_some()) && motion_state.is_some())
                 .then(|| cfg.rtsp.pick(2000).map(|(_, u)| u.to_string()))
                 .flatten()
@@ -164,6 +201,16 @@ fn main() {
             let ev = Arc::new(events::Events::new(server.clone(), cfg.doorbell.then_some(camera::SWITCH_EVENT), snapshots.clone(), motion));
             if let (Some(p), Some(pc)) = (&protect, &cfg.protect) {
                 follow_protect(p.clone(), pc.motion, ev.clone());
+            }
+            if let (Some((o, _)), Some(oc)) = (&onvif, &cfg.onvif) {
+                let (motion_keys, ring_keys, ev) = (oc.motion_topics.clone(), oc.ring_topics.clone(), ev.clone());
+                o.clone().follow(move |topic, _name, value| {
+                    if onvif::motion_value(topic, value, &ring_keys) == Some(true) {
+                        ev.ring("onvif");
+                    } else if let Some(on) = onvif::motion_value(topic, value, &motion_keys) {
+                        if on { ev.motion_start("onvif") } else { ev.motion_end("onvif") }
+                    }
+                });
             }
             if let Some(listen) = &cfg.ring_listen {
                 if cfg.ring_token.is_empty() {
@@ -206,6 +253,65 @@ fn follow_protect(p: Arc<protect::Protect>, kind: protect::MotionKind, ev: Arc<e
             }
         }
     });
+}
+
+/// Log in to the ONVIF camera (retrying until it answers), fill in [rtsp] from its H.264
+/// profiles when not set, and find its snapshot URL.
+fn connect_onvif(oc: &OnvifCfg, rtsp: &mut stream::Channels) -> (Arc<onvif::Onvif>, Option<String>) {
+    let o = loop {
+        match onvif::Onvif::connect(&oc.url, &oc.user, &oc.password) {
+            Ok(o) => break o,
+            Err(e) => {
+                log(format!("onvif: {e} (retrying in 10 s)"));
+                std::thread::sleep(std::time::Duration::from_secs(10));
+            }
+        }
+    };
+    let mut profiles: Vec<onvif::Profile> = o.profiles().unwrap_or_else(|e| die(e)).into_iter().filter(|p| p.encoding.eq_ignore_ascii_case("H264")).collect();
+    profiles.sort_by_key(|p| std::cmp::Reverse(p.width * p.height));
+    if rtsp.high.is_none() && rtsp.medium.is_none() && rtsp.low.is_none() {
+        if profiles.is_empty() {
+            die("onvif: no H.264 profile (switch the camera's streams to H.264)".into());
+        }
+        let uri = |p: &onvif::Profile| o.stream_uri(&p.token).map(|u| onvif::with_credentials(&u, &oc.user, &oc.password)).unwrap_or_else(|e| die(e));
+        rtsp.high = Some(uri(&profiles[0]));
+        if profiles.len() > 1 {
+            rtsp.low = Some(uri(profiles.last().unwrap()));
+        }
+        rtsp.medium = Some(if profiles.len() > 2 { uri(&profiles[1]) } else { rtsp.high.clone().unwrap() });
+        log(format!("onvif: streams from profiles {}", profiles.iter().map(|p| format!("{} {}x{}", p.name, p.width, p.height)).collect::<Vec<_>>().join(", ")));
+    }
+    let snapshot = if oc.snapshot {
+        profiles.first().and_then(|p| o.snapshot_uri(&p.token).ok()).map(|u| onvif::with_credentials(&u, &oc.user, &oc.password))
+    } else {
+        None
+    };
+    (Arc::new(o), snapshot)
+}
+
+/// `onvif-info <config>`: what the [onvif] camera offers, and its events for 30 s.
+fn onvif_info(cfg: &Config) {
+    let oc = cfg.onvif.as_ref().unwrap_or_else(|| die("needs an [onvif] section (url, user, password)".into()));
+    let o = onvif::Onvif::connect(&oc.url, &oc.user, &oc.password).unwrap_or_else(|e| die(e));
+    let (make, model) = o.device_info().unwrap_or_default();
+    println!("device: {make} {model}");
+    let mask = |u: &str| match u.split_once("://") {
+        Some((s, rest)) => format!("{s}://{}", rest.split_once('@').map(|(_, h)| h).unwrap_or(rest)),
+        None => u.to_string(),
+    };
+    for p in o.profiles().unwrap_or_else(|e| die(e)) {
+        println!("profile {} \"{}\": {} {}x{} {} kbps", p.token, p.name, p.encoding, p.width, p.height, p.bitrate_kbps);
+        if let Ok(u) = o.stream_uri(&p.token) {
+            println!("  rtsp:     {}", mask(&u));
+        }
+        if let Ok(u) = o.snapshot_uri(&p.token) {
+            println!("  snapshot: {}", mask(&u));
+        }
+    }
+    println!("events for 30 s (move in front of the camera):");
+    let o = Arc::new(o);
+    o.follow(|topic, name, value| println!("  {topic}  {name}={value}"));
+    std::thread::sleep(std::time::Duration::from_secs(30));
 }
 
 /// The console's host, from any RTSP URL.

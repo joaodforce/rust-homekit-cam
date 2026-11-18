@@ -50,7 +50,13 @@ pub fn dechunk(mut b: &[u8]) -> Vec<u8> {
 
 /// GET a plain `http://[user:pass@]host[:port]/path` URL; retries once with Basic/Digest on 401.
 pub fn get(url: &str) -> Result<Resp, String> {
-    let rest = url.strip_prefix("http://").ok_or("only http:// snapshot URLs are supported")?;
+    request("GET", url, None, &[], Duration::from_secs(10))
+}
+
+/// One request to a plain `http://[user:pass@]host[:port]/path` URL, with an optional body
+/// (content type, bytes); on 401 retried once with Basic or Digest (qop=auth too).
+pub fn request(method: &str, url: &str, content_type: Option<&str>, body: &[u8], timeout: Duration) -> Result<Resp, String> {
+    let rest = url.strip_prefix("http://").ok_or("only http:// URLs are supported")?;
     let (auth_host, path) = rest.split_at(rest.find('/').unwrap_or(rest.len()));
     let path = if path.is_empty() { "/" } else { path };
     let (creds, host) = match auth_host.rsplit_once('@') {
@@ -63,14 +69,19 @@ pub fn get(url: &str) -> Result<Resp, String> {
     let addr = if host.contains(':') { host.to_string() } else { format!("{host}:80") };
     let once = |auth: Option<String>| -> Result<Resp, String> {
         let mut s = TcpStream::connect(&addr).map_err(|e| format!("{addr}: {e}"))?;
-        s.set_read_timeout(Some(Duration::from_secs(10))).ok();
-        let mut req = format!("GET {path} HTTP/1.1\r\nHost: {host}\r\nUser-Agent: rust-homekit-cam\r\nConnection: close\r\n");
+        s.set_read_timeout(Some(timeout)).ok();
+        let mut req = format!("{method} {path} HTTP/1.1\r\nHost: {host}\r\nUser-Agent: rust-homekit-cam\r\nConnection: close\r\n");
+        if let Some(ct) = content_type {
+            req.push_str(&format!("Content-Type: {ct}\r\nContent-Length: {}\r\n", body.len()));
+        }
         if let Some(a) = auth {
             req.push_str(&a);
             req.push_str("\r\n");
         }
         req.push_str("\r\n");
-        s.write_all(req.as_bytes()).map_err(|e| e.to_string())?;
+        let mut bytes = req.into_bytes();
+        bytes.extend_from_slice(body);
+        s.write_all(&bytes).map_err(|e| e.to_string())?;
         let mut raw = Vec::new();
         let _ = s.read_to_end(&mut raw);
         parse(&raw)
@@ -80,7 +91,7 @@ pub fn get(url: &str) -> Result<Resp, String> {
         (401, Some((u, p))) => {
             let chs: Vec<&str> = r.headers.iter().filter(|(k, _)| k == "www-authenticate").map(|(_, v)| v.as_str()).collect();
             let ch = chs.iter().find(|c| c.to_ascii_lowercase().starts_with("digest")).or(chs.first()).ok_or("401 without a challenge")?;
-            once(Some(crate::rtsp::authorization(ch, u, p, "GET", path)))
+            once(Some(crate::rtsp::authorization(ch, u, p, method, path)))
         }
         _ => Ok(r),
     }

@@ -70,22 +70,44 @@ fn md5_hex(s: &str) -> String {
     Md5::digest(s.as_bytes()).iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// The Authorization header for a challenge (Digest, RFC 2617 without qop, as cameras use;
-/// or Basic).
+/// The Authorization header for a challenge: Digest (RFC 2617, with `qop=auth` when offered,
+/// as HTTP cameras do; without, as RTSP servers do) or Basic.
 pub(crate) fn authorization(challenge: &str, user: &str, pass: &str, method: &str, uri: &str) -> String {
     let param = |name: &str| {
-        let key = format!("{name}=\"");
-        challenge.find(&key).map(|i| &challenge[i + key.len()..]).and_then(|r| r.split('"').next()).unwrap_or("").to_string()
+        let lower = challenge.to_ascii_lowercase();
+        let key = format!("{name}=");
+        let i = lower.match_indices(&key).find(|(i, _)| *i == 0 || matches!(lower.as_bytes()[i - 1], b' ' | b',' | b'\t'))?.0 + key.len();
+        let rest = &challenge[i..];
+        Some(match rest.strip_prefix('"') {
+            Some(q) => q.split('"').next().unwrap_or("").to_string(),
+            None => rest.split(',').next().unwrap_or("").trim().to_string(),
+        })
     };
-    if challenge.trim_start().to_ascii_lowercase().starts_with("digest") {
-        let (realm, nonce) = (param("realm"), param("nonce"));
-        let ha1 = md5_hex(&format!("{user}:{realm}:{pass}"));
-        let ha2 = md5_hex(&format!("{method}:{uri}"));
-        let response = md5_hex(&format!("{ha1}:{nonce}:{ha2}"));
-        format!("Authorization: Digest username=\"{user}\", realm=\"{realm}\", nonce=\"{nonce}\", uri=\"{uri}\", response=\"{response}\"")
-    } else {
-        format!("Authorization: Basic {}", crate::tlv::b64(format!("{user}:{pass}").as_bytes()))
+    if !challenge.trim_start().to_ascii_lowercase().starts_with("digest") {
+        return format!("Authorization: Basic {}", crate::tlv::b64(format!("{user}:{pass}").as_bytes()));
     }
+    let (realm, nonce) = (param("realm").unwrap_or_default(), param("nonce").unwrap_or_default());
+    let ha1 = md5_hex(&format!("{user}:{realm}:{pass}"));
+    let ha2 = md5_hex(&format!("{method}:{uri}"));
+    let mut h = format!("Authorization: Digest username=\"{user}\", realm=\"{realm}\", nonce=\"{nonce}\", uri=\"{uri}\"");
+    let qop_auth = param("qop").is_some_and(|q| q.split(',').any(|x| x.trim() == "auth"));
+    if qop_auth {
+        use rand_core::RngCore;
+        let mut c = [0u8; 8];
+        rand_core::OsRng.fill_bytes(&mut c);
+        let cnonce: String = c.iter().map(|b| format!("{b:02x}")).collect();
+        let response = md5_hex(&format!("{ha1}:{nonce}:00000001:{cnonce}:auth:{ha2}"));
+        h.push_str(&format!(", qop=auth, nc=00000001, cnonce=\"{cnonce}\", response=\"{response}\""));
+    } else {
+        h.push_str(&format!(", response=\"{}\"", md5_hex(&format!("{ha1}:{nonce}:{ha2}"))));
+    }
+    if let Some(o) = param("opaque") {
+        h.push_str(&format!(", opaque=\"{o}\""));
+    }
+    if let Some(a) = param("algorithm") {
+        h.push_str(&format!(", algorithm={a}"));
+    }
+    h
 }
 
 /// One interleaved packet: channel (even = RTP, odd = RTCP) and bytes.
@@ -273,6 +295,10 @@ mod tests {
         let a = authorization(ch, "Mufasa", "Circle Of Life", "GET", "/dir/index.html");
         assert!(a.contains(r#"response="670fd8c2df070c60b045671b8b24ff02""#), "{a}");
         assert_eq!(authorization("Basic realm=\"x\"", "a", "b", "DESCRIBE", "/"), "Authorization: Basic YTpi");
+        // with qop=auth: the response mixes in nc and cnonce
+        let ch = r#"Digest realm="Login to 2J0", qop="auth", nonce="123", opaque="abc""#;
+        let a = authorization(ch, "admin", "pw", "GET", "/cgi-bin/snapshot.cgi");
+        assert!(a.contains("qop=auth, nc=00000001, cnonce=") && a.contains(r#"opaque="abc""#), "{a}");
     }
 
     #[test]
