@@ -36,6 +36,7 @@ picks the right one for the machine, verifies it, and installs it:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/joaodforce/rust-homekit-cam/main/install.sh -o install.sh
+# no curl (minimal Debian)? wget -O install.sh https://raw.githubusercontent.com/joaodforce/rust-homekit-cam/main/install.sh
 less install.sh            # read it first: it's short
 sudo sh install.sh         # or: sudo VERSION=v0.1.0 sh install.sh
 ```
