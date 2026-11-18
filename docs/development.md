@@ -6,7 +6,7 @@ cargo test          # unit tests: HAP crypto, TLV, SRTP (RFC 3711 vectors), RTSP
 cargo build --release
 ```
 
-Pure Rust, no C dependencies. Run a dev instance on a Mac or Linux box on the same network as
+Rust plus `ring` (TLS crypto), which needs a C compiler for the target. Run a dev instance on a Mac or Linux box on the same network as
 your home hubs:
 
 ```bash
@@ -16,9 +16,26 @@ rust-homekit-cam serve dev/config.toml        # dev/ is gitignored: keep configs
 (set `state_dir = "dev/state"` in a dev config). Stop it before running the same identity
 anywhere else.
 
-## Deploying from a Mac
+## Building from source on Linux
 
-`make deploy HOST=root@<host>` builds a static x86_64 musl binary with
+With [rustup](https://rustup.rs) (Rust 1.85 or newer, for edition 2024) and a C compiler
+(`apt install build-essential`):
+
+```bash
+git clone https://github.com/joaodforce/rust-homekit-cam && cd rust-homekit-cam
+cargo build --release --locked
+sudo install -m 755 target/release/rust-homekit-cam /usr/local/bin/
+sudo install -m 644 deploy/rust-homekit-cam@.service /etc/systemd/system/
+sudo install -D -m 644 config.example.toml /usr/local/share/rust-homekit-cam/config.example.toml
+sudo install -d -m 700 /etc/rust-homekit-cam
+sudo systemctl daemon-reload
+```
+
+This build links against the system's glibc; the release binaries are static (musl), see below.
+
+## Deploying from a Mac (development)
+
+For quick iterations on a test host. `make deploy HOST=root@<host>` builds a static x86_64 musl binary with
 [cargo-zigbuild](https://github.com/rust-cross/cargo-zigbuild) (`brew install zig
 cargo-zigbuild`, `rustup target add x86_64-unknown-linux-musl`), copies it and the systemd
 template unit over SSH and restarts every `rust-homekit-cam@*` instance. The Makefile puts
