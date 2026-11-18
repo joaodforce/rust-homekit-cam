@@ -43,6 +43,15 @@ it, and it would need encoding); a camera's Opus track is passed through with a 
 iPhones on the LAN ask for 20 ms packets, home hubs relaying over the internet for 60 ms: then
 three 20 ms Opus frames go into one packet (code 3, RFC 6716), still the same audio data.
 
+Timestamps: Opus over RTP normally runs on a 48 kHz clock (RFC 7587), but HomeKit times it by
+the sample rate it requested (RFC 3550 style): at 16 kHz a 20 ms packet is 320 ticks, not 960.
+Passing 48 kHz timestamps through makes every packet look three times as long, and LAN audio
+stutters. They are rescaled to the requested rate, keeping the camera's own timing. (go2rtc and
+Scrypted do the same.)
+
+The jitter in the iPhone's RTCP reports (logged as `rtcp audio/video`) stays at a few hundred
+ms even when playback is smooth; loss, NACKs and keyframe requests are the useful numbers.
+
 Two-way audio: the iPhone's microphone arrives as SRTP (Opus) on our audio port; we decrypt it
 and hand the RTP packets to the talk-back backend. Protect's integration API opens a talk-back
 session that points at the camera itself (Opus over RTP, UDP 7004).
