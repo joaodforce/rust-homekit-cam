@@ -412,21 +412,35 @@ fn probe(ch: &stream::Channels) {
             let codecs: Vec<String> = tracks.iter().map(|t| format!("{}/{}", t.codec, t.clock)).collect();
             let v = tracks.iter().find(|t| t.codec == "h264").ok_or("no h264")?;
             c.setup(v, 0)?;
+            let a = tracks.iter().find(|t| t.codec == "opus");
+            if let Some(a) = a {
+                c.setup(a, 2)?;
+            }
             c.play()?;
             let mut d = h264::Depacketizer::default();
             let (mut nals, mut types, mut max) = (Vec::new(), [0u32; 32], 0usize);
+            let (mut vj, mut aj) = (stream::Jitter::default(), stream::Jitter::default());
+            let mut bytes = 0usize;
             let t0 = std::time::Instant::now();
-            while t0.elapsed().as_secs() < 3 {
+            while t0.elapsed().as_secs() < 5 {
                 let (chn, p) = c.next()?;
                 if chn == 0 {
                     max = max.max(p.len());
+                    bytes += p.len();
+                    vj.push(&p, v.clock);
                     d.push(&p, &mut nals);
+                } else if chn == 2 {
+                    aj.push(&p, a.map(|a| a.clock).unwrap_or(48_000));
                 }
             }
             for n in nals.drain(..) {
                 types[(n.data[0] & 0x1f) as usize] += 1;
             }
-            Ok(format!("tracks {codecs:?}, sprop {}, max pkt {max}, NALs: idr {} non-idr {} sps {} pps {}", v.params.len(), types[5], types[1], types[7], types[8]))
+            let audio = if a.is_some() { format!(", audio {:.0} ms (worst {:.0})", aj.j, aj.worst) } else { String::new() };
+            Ok(format!(
+                "tracks {codecs:?}, video {} kbps, sprop {}, max pkt {max}, NALs: idr {} non-idr {} sps {} pps {}; arrival jitter: video {:.0} ms (worst {:.0}){audio}",
+                bytes * 8 / 5000, v.params.len(), types[5], types[1], types[7], types[8], vj.j, vj.worst
+            ))
         })();
         println!("{name}: {}", r.unwrap_or_else(|e| format!("error: {e}")));
     }

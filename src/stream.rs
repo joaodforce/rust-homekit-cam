@@ -236,6 +236,28 @@ pub fn start(ep: Endpoint, req: Request, channels: &Channels, protect: Option<Ar
     Ok(h)
 }
 
+/// RFC 3550 interarrival jitter of RTP packets as they pass a point (ms), and the worst single
+/// deviation; works on any packet with an RTP header (SRTP keeps it in clear).
+#[derive(Default)]
+pub struct Jitter {
+    last: Option<(Instant, u32)>,
+    pub j: f64,
+    pub worst: f64,
+}
+
+impl Jitter {
+    pub fn push(&mut self, p: &[u8], clock: u32) {
+        let Some(ts) = p.get(4..8).map(|b| u32::from_be_bytes(b.try_into().unwrap())) else { return };
+        let now = Instant::now();
+        if let Some((t, ts0)) = self.last {
+            let d = (now - t).as_secs_f64() * 1000.0 - ts.wrapping_sub(ts0) as i32 as f64 * 1000.0 / clock as f64;
+            self.j += (d.abs() - self.j) / 16.0;
+            self.worst = self.worst.max(d.abs());
+        }
+        self.last = Some((now, ts));
+    }
+}
+
 /// The controller's RTCP about what it receives from us: receiver reports (loss, jitter) and
 /// feedback (keyframe requests, NACKs), summarised in the log: every 10 s while there are
 /// problems, otherwise every 60 s.
@@ -286,7 +308,8 @@ impl RtcpStats {
             p = &p[len..];
         }
         let jitter_ms = self.jitter_max * 1000 / self.clock.max(1);
-        let trouble = self.loss_max > 0 || self.pli > 0 || self.nack > 0 || jitter_ms > 40;
+        // jitter from iPhones runs ~200 ms even when what we send is smooth: not a trouble sign
+        let trouble = self.loss_max > 0 || self.pli > 0 || self.nack > 0;
         let every = if trouble { 10 } else { 60 };
         if self.reports > 0 && self.since.elapsed() >= Duration::from_secs(every) {
             crate::log(format!(
@@ -321,6 +344,7 @@ fn run(ep: &Endpoint, req: &Request, url: &str, stop: &AtomicBool, conn: &Mutex<
     let mut audio = opus.and(req.audio.as_ref()).map(|a| (Rewriter::opus(a.pt, ep.audio_ssrc, a.ptime), srtp::Sender::new(&ep.audio_srtp_out)));
     let mut a_out = Vec::new();
     let (mut a_count, mut a_octets, mut a_logged) = (0u32, 0u32, false);
+    let (mut vj, mut aj) = (Jitter::default(), Jitter::default());
 
     let dest = SocketAddr::new(ep.controller, ep.video_port);
     let mut srtp = srtp::Sender::new(&ep.video_srtp_out);
@@ -345,6 +369,7 @@ fn run(ep: &Endpoint, req: &Request, url: &str, stop: &AtomicBool, conn: &Mutex<
                     }
                     a_count = a_count.wrapping_add(1);
                     a_octets = a_octets.wrapping_add((p.len() - 12) as u32);
+                    aj.push(&p, 48_000);
                     let _ = ep.audio_sock.send_to(&sr.protect_rtp(&p), audio_dest);
                 }
             }
@@ -361,6 +386,7 @@ fn run(ep: &Endpoint, req: &Request, url: &str, stop: &AtomicBool, conn: &Mutex<
             first_ts.get_or_insert(pack.last_ts);
             count = count.wrapping_add(1);
             octets = octets.wrapping_add((p.len() - 12) as u32);
+            vj.push(&p, 90_000);
             let _ = ep.video_sock.send_to(&srtp.protect_rtp(&p), dest);
         }
         if first_ts.is_some() && last_sr.elapsed() > Duration::from_millis(500) {
@@ -373,7 +399,15 @@ fn run(ep: &Endpoint, req: &Request, url: &str, stop: &AtomicBool, conn: &Mutex<
             }
         }
         if count > 0 && count % 2000 == 0 {
-            crate::log(format!("stream: {count} packets in {:.0} s", started.elapsed().as_secs_f32()));
+            crate::log(format!(
+                "stream: {count} packets in {:.0} s; send jitter video {:.0} ms (worst {:.0}), audio {:.0} ms (worst {:.0})",
+                started.elapsed().as_secs_f32(),
+                vj.j,
+                vj.worst,
+                aj.j,
+                aj.worst
+            ));
+            (vj.worst, aj.worst) = (0.0, 0.0);
         }
     }
     Ok(())
