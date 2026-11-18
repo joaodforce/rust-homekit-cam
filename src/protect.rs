@@ -201,7 +201,8 @@ impl Ws {
         self.s.write_all(&f)
     }
 
-    /// The next text message; `Ok(None)` on a read timeout.
+    /// The next text message (empty for a pong: the connection is alive); `Ok(None)` on a read
+    /// timeout.
     fn next(&mut self) -> Result<Option<String>, String> {
         let mut msg = Vec::new();
         loop {
@@ -232,7 +233,7 @@ impl Ws {
             match opcode {
                 0x8 => return Err("websocket closed by the console".into()),
                 0x9 => self.send(0xA, &data).map_err(|e| e.to_string())?,
-                0xA => {}
+                0xA => return Ok(Some(String::new())),
                 0x0..=0x2 => {
                     msg.extend_from_slice(&data);
                     if fin {
@@ -295,12 +296,17 @@ impl Protect {
                             match ws.next() {
                                 Ok(Some(m)) => {
                                     idle = 0;
+                                    if m.is_empty() {
+                                        continue;
+                                    }
                                     if let Some(e) = parse_event(&m, &self.camera, kind) {
                                         on(e);
                                     }
                                 }
                                 Ok(None) => {
                                     idle += 1;
+                                    // a quiet stream is normal: ping, and give up only when
+                                    // two pings in a row go unanswered
                                     if idle > 2 || ws.send(0x9, b"").is_err() {
                                         crate::log("protect: event stream silent, reconnecting".into());
                                         break;
