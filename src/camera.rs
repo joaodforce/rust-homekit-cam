@@ -61,11 +61,12 @@ pub struct Camera {
     endpoints: Mutex<HashMap<Vec<u8>, Endpoint>>,
     muted: Mutex<(bool, bool, u8)>, // microphone, speaker, volume
     channels: Channels,
+    protect: Option<Arc<crate::protect::Protect>>,
     streams: Mutex<HashMap<Vec<u8>, stream::Handle>>,
 }
 
 impl Camera {
-    pub fn new(name: &str, doorbell: bool, channels: Channels) -> Self {
+    pub fn new(name: &str, doorbell: bool, channels: Channels, protect: Option<Arc<crate::protect::Protect>>) -> Self {
         Camera {
             name: name.into(),
             doorbell,
@@ -73,6 +74,7 @@ impl Camera {
             endpoints: Mutex::new(HashMap::new()),
             muted: Mutex::new((false, false, 100)),
             channels,
+            protect,
             streams: Mutex::new(HashMap::new()),
         }
     }
@@ -180,7 +182,7 @@ impl Camera {
         let ptime = tlv::get_uint(&params, 4).unwrap_or(0);
         let pt = tlv::get_uint(&rtp, 1).unwrap_or(110) as u8;
         crate::log(format!("audio selected: codec {codec} {rate} kHz, {ptime} ms packets, pt {pt}{}", if muted { " (muted)" } else { "" }));
-        (codec == OPUS as u64 && !muted).then_some(stream::Audio { pt, ptime: ptime as u32 })
+        (codec == OPUS as u64 && !muted).then_some(stream::Audio { pt, ptime: ptime as u32, rate: rate * 1000 })
     }
 
     /// SelectedRTPStreamConfiguration write: start / stop / reconfigure.
@@ -201,7 +203,7 @@ impl Camera {
                 let ep = self.endpoints.lock().unwrap().get(&sid).cloned().ok_or(BAD_VALUE)?;
                 let audio = Self::selected_audio(&items, self.muted.lock().unwrap().0);
                 let req = stream::Request { pt, kbps, mtu: mtu as usize, audio };
-                match stream::start(ep, req, &self.channels) {
+                match stream::start(ep, req, &self.channels, self.protect.clone()) {
                     Ok(h) => {
                         self.streams.lock().unwrap().insert(sid, h);
                     }
@@ -360,17 +362,17 @@ mod tests {
 
     #[test]
     fn database_has_doorbell_and_camera() {
-        let cam = Camera::new("Doorbell", true, Channels::default());
+        let cam = Camera::new("Doorbell", true, Channels::default(), None);
         let s = cam.services("AA:BB");
         let types: Vec<&str> = s.as_array().unwrap().iter().map(|s| s["type"].as_str().unwrap()).collect();
         assert_eq!(types, ["3E", "A2", "110", "112", "113", "121"]);
         assert_eq!(cam.read(conn(), SWITCH_EVENT), Ok(Value::Null));
-        assert!(Camera::new("Cam", false, Channels::default()).services("x").as_array().unwrap().len() == 5);
+        assert!(Camera::new("Cam", false, Channels::default(), None).services("x").as_array().unwrap().len() == 5);
     }
 
     #[test]
     fn setup_endpoints_answers_with_our_side() {
-        let cam = Camera::new("Doorbell", true, Channels::default());
+        let cam = Camera::new("Doorbell", true, Channels::default(), None);
         let srtp = Tlv::new().u8(1, 0).bytes(2, &[1; 16]).bytes(3, &[2; 14]);
         let req = Tlv::new()
             .bytes(1, &[9; 16])

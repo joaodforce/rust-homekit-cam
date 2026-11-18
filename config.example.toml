@@ -9,6 +9,14 @@ state_dir = "/var/lib/rust-homekit-cam"
 ring_listen = "0.0.0.0:8780"
 ring_token = "change-me"
 
+# Two-way audio: a Protect API key (UniFi OS → Settings → Control Plane → Integrations),
+# the camera's id, and the console's certificate fingerprint (logged on first use if unset).
+# The service host must be able to reach the camera on UDP 7004 (camera VLAN firewall!).
+protect_token = "…"
+protect_camera_id = "…"
+# protect_host = "192.0.2.1"   # default: the RTSP host
+# protect_cert_sha256 = "AB:CD:…"
+
 # Protect: Settings → camera → Advanced → RTSP. Plain RTSP (port 7447) on the LAN.
 [rtsp]
 high = "rtsp://192.0.2.1:7447/xxxxxxxxxxxxxxxx"

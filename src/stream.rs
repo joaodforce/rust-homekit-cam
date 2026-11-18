@@ -5,6 +5,7 @@
 use crate::camera::Endpoint;
 use crate::h264::{Depacketizer, Packetizer};
 use crate::rtsp;
+use crate::protect::Protect;
 use crate::srtp;
 use rand_core::{OsRng, RngCore};
 use serde::Deserialize;
@@ -50,6 +51,8 @@ pub struct Audio {
     pub pt: u8,
     /// requested packet time, ms (informational: Protect's own framing is sent as is)
     pub ptime: u32,
+    /// the controller's Opus sample rate (its microphone, for talk-back)
+    pub rate: u32,
 }
 
 /// Rewrites an incoming RTP packet's header for our stream: PT, SSRC, own seq, offset ts.
@@ -113,7 +116,7 @@ impl Drop for Handle {
     }
 }
 
-pub fn start(ep: Endpoint, req: Request, channels: &Channels) -> Result<Handle, String> {
+pub fn start(ep: Endpoint, req: Request, channels: &Channels, protect: Option<Arc<Protect>>) -> Result<Handle, String> {
     let (name, url) = channels.pick(req.kbps).ok_or("no RTSP URL configured")?;
     let url = url.to_string();
     let stop = Arc::new(AtomicBool::new(false));
@@ -140,6 +143,12 @@ pub fn start(ep: Endpoint, req: Request, channels: &Channels) -> Result<Handle, 
             }
         }
     });
+
+    // two-way audio: a Protect talk-back session, then the controller's Opus RTP straight to it
+    if let (Some(_), Some(p)) = (&req.audio, protect) {
+        let (sock, key, stop3) = (ep.audio_sock.clone(), ep.audio_srtp_in.clone(), stop.clone());
+        std::thread::spawn(move || talkback(sock, key, &p, stop3));
+    }
 
     std::thread::spawn(move || {
         if let Err(e) = run(&ep, &req, &url, &stop, &rtsp_conn) {
@@ -226,6 +235,42 @@ fn run(ep: &Endpoint, req: &Request, url: &str, stop: &AtomicBool, conn: &Mutex<
     Ok(())
 }
 
+/// The controller's microphone → camera speaker, until the stream stops. No transcoding: the
+/// camera takes Opus over RTP; we decrypt, give the packets our own header and forward them.
+fn talkback(sock: Arc<std::net::UdpSocket>, key: Vec<u8>, protect: &Protect, stop: Arc<AtomicBool>) {
+    let tb = match protect.talkback() {
+        Ok(t) if t.codec == "opus" => t,
+        Ok(t) => return crate::log(format!("talkback: camera wants {} (only Opus is supported)", t.codec)),
+        Err(e) => return crate::log(format!("talkback: {e}")),
+    };
+    crate::log(format!("talkback: session to {} ({} {} Hz)", tb.addr, tb.codec, tb.rate));
+    let Ok(out) = std::net::UdpSocket::bind(("0.0.0.0", 0)) else { return };
+    let _ = sock.set_read_timeout(Some(Duration::from_secs(1)));
+    let mut srtp = srtp::Receiver::new(&key);
+    let mut rw = Rewriter::new(96, OsRng.next_u32());
+    let (mut buf, mut got, mut bad) = ([0u8; 2048], 0u64, 0u64);
+    while !stop.load(Ordering::Relaxed) {
+        let Ok(n) = sock.recv(&mut buf) else { continue };
+        let p = &buf[..n];
+        if n < 12 || (200..=204).contains(&p[1]) {
+            continue; // RTCP
+        }
+        let Some(rtp) = srtp.unprotect_rtp(p) else {
+            bad += 1;
+            continue;
+        };
+        let Some(pkt) = rw.rewrite(&rtp) else { continue };
+        got += 1;
+        if got == 1 {
+            crate::log(format!("talkback: first packet from the controller ({} bytes Opus)", pkt.len() - 12));
+        }
+        let _ = out.send_to(&pkt, tb.addr);
+    }
+    if got > 0 || bad > 0 {
+        crate::log(format!("talkback: {got} packets forwarded, {bad} rejected"));
+    }
+}
+
 fn sender_report(ssrc: u32, ts: u32, count: u32, octets: u32) -> Vec<u8> {
     let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
     let ntp_s = now.as_secs() + 2_208_988_800;
@@ -246,7 +291,7 @@ mod tests {
 
     #[test]
     fn channel_choice() {
-        let c = Channels { high: Some("h".into()), medium: Some("m".into()), low: Some("l".into()), allow_high: false };
+        let c = Channels { high: Some("h".into()), medium: Some("m".into()), low: Some("l".into()), ..Default::default() };
         assert_eq!(c.pick(164).unwrap().0, "low");
         assert_eq!(c.pick(2000).unwrap().0, "medium");
         assert_eq!(c.pick(8000).unwrap().0, "medium");

@@ -5,6 +5,7 @@
 mod camera;
 mod h264;
 mod hap;
+mod protect;
 mod ring;
 mod rtsp;
 mod srtp;
@@ -33,6 +34,12 @@ struct Config {
     ring_listen: Option<String>,
     #[serde(default)]
     ring_token: String,
+    /// Protect integration API (two-way audio): API key, camera id; the console's address
+    /// (default: the RTSP host) and its certificate's SHA-256 fingerprint ("AB:CD:…").
+    protect_token: Option<String>,
+    protect_camera_id: Option<String>,
+    protect_host: Option<String>,
+    protect_cert_sha256: Option<String>,
     /// Protect RTSP URLs (rtsp://<nvr>:7447/<alias>) per channel, for live view.
     #[serde(default)]
     rtsp: stream::Channels,
@@ -73,7 +80,17 @@ fn main() {
         "probe" => probe(&cfg.rtsp),
         "reset" =>println!("removed {} pairing(s); restart the service", hap::reset(cfg.state_dir)),
         "serve" => {
-            let cam = Arc::new(camera::Camera::new(&cfg.name, cfg.doorbell, cfg.rtsp.clone()));
+            let protect = match (&cfg.protect_token, &cfg.protect_camera_id) {
+                (Some(key), Some(cam)) => {
+                    let host = cfg.protect_host.clone().or_else(|| rtsp_host(&cfg.rtsp)).unwrap_or_else(|| die("protect_host?".into()));
+                    Some(Arc::new(protect::Protect::new(&host, key, cam, cfg.protect_cert_sha256.as_deref()).unwrap_or_else(|e| die(e))))
+                }
+                _ => {
+                    log("no protect_token / protect_camera_id: two-way audio off".into());
+                    None
+                }
+            };
+            let cam = Arc::new(camera::Camera::new(&cfg.name, cfg.doorbell, cfg.rtsp.clone(), protect));
             let server = hap::Server::start(cam, cfg.hap_port, cfg.state_dir).unwrap_or_else(|e| die(e));
             if let Some(listen) = &cfg.ring_listen {
                 if cfg.ring_token.is_empty() {
@@ -88,6 +105,12 @@ fn main() {
         }
         c => die(format!("unknown command {c}")),
     }
+}
+
+/// The console's host, from any RTSP URL.
+fn rtsp_host(ch: &stream::Channels) -> Option<String> {
+    let url = ch.low.as_ref().or(ch.medium.as_ref()).or(ch.high.as_ref())?;
+    Some(url.strip_prefix("rtsp://")?.split(['/', ':']).next()?.to_string())
 }
 
 /// `probe`: pull ~3 s from each configured channel and count what arrives (no secrets printed).

@@ -105,6 +105,45 @@ impl Sender {
     }
 }
 
+/// Unprotects one remote sender's SRTP (the controller's microphone).
+pub struct Receiver {
+    rtp: Keys,
+    roc: u32,
+    last_seq: Option<u16>,
+}
+
+impl Receiver {
+    pub fn new(master: &[u8]) -> Receiver {
+        Receiver { rtp: Keys::new(master, 0), roc: 0, last_seq: None }
+    }
+
+    /// SRTP packet → RTP packet (header + plain payload); None if too short or the tag is wrong.
+    pub fn unprotect_rtp(&mut self, pkt: &[u8]) -> Option<Vec<u8>> {
+        if pkt.len() < 12 + 10 {
+            return None;
+        }
+        let (body, tag) = pkt.split_at(pkt.len() - 10);
+        let seq = u16::from_be_bytes([body[2], body[3]]);
+        let ssrc = u32::from_be_bytes(body[8..12].try_into().ok()?);
+        // guess the rollover counter from the sequence number (RFC 3711 3.3.1, simplified)
+        let roc = match self.last_seq {
+            Some(l) if seq < l && l - seq > 0x8000 => self.roc.wrapping_add(1),
+            Some(l) if seq > l && seq - l > 0x8000 => self.roc.wrapping_sub(1),
+            _ => self.roc,
+        };
+        if self.rtp.tag(&[body, &roc.to_be_bytes()]) != tag {
+            return None;
+        }
+        if roc != self.roc.wrapping_sub(1) {
+            self.roc = roc;
+            self.last_seq = Some(seq);
+        }
+        let mut out = body.to_vec();
+        aes_cm(&self.rtp.enc, &self.rtp.iv(ssrc, (roc as u64) << 16 | seq as u64), &mut out[12..]);
+        Some(out)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -145,5 +184,19 @@ mod tests {
         assert_eq!(s.roc, 1);
         let sr = [0x80, 200, 0, 6, 1, 2, 3, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
         assert_eq!(s.protect_rtcp(&sr).len(), sr.len() + 14);
+    }
+
+    #[test]
+    fn receiver_roundtrip_and_rejects_tampering() {
+        let key = [5u8; 30];
+        let (mut tx, mut rx) = (Sender::new(&key), Receiver::new(&key));
+        for seq in [0xfffeu16, 0xffff, 0, 1] {
+            let mut p = vec![0x80, 110, 0, 0, 0, 0, 0, 1, 9, 8, 7, 6, 1, 2, 3, 4, 5];
+            p[2..4].copy_from_slice(&seq.to_be_bytes());
+            let mut wire = tx.protect_rtp(&p);
+            assert_eq!(rx.unprotect_rtp(&wire).unwrap(), p);
+            wire[13] ^= 1;
+            assert!(rx.unprotect_rtp(&wire).is_none());
+        }
     }
 }
