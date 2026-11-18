@@ -80,7 +80,9 @@ iPhone / Home hub ──HAP (HTTP, ChaCha20-Poly1305)──► rust-homekit-cam 
   without audio for now (an optional audio-only transcode could be added). Only Opus is offered:
   with AAC-ELD listed the iPhone picks AAC-ELD. iOS keeps the audio configuration it saw when
   the accessory was added, so after changing the offer the accessory has to be removed and
-  added again.
+  added again. Packet time: iPhones on the LAN ask for 20 ms, home hubs relaying over the
+  internet for 60 ms; the camera's 20 ms frames are then packed three to a packet (Opus code 3,
+  RFC 6716), still without transcoding.
 - **Two-way audio**: the iPhone sends its microphone as SRTP (Opus) to our audio port; a
   talk-back backend gets it to the camera's speaker. Protect: the integration API opens a
   talk-back session (Opus over RTP straight to the camera, UDP 7004) and we forward the packets
