@@ -196,15 +196,17 @@ pub fn start(ep: Endpoint, req: Request, channels: &Channels, protect: Option<Ar
     let h = Handle { stop: stop.clone(), rtsp: rtsp_conn.clone() };
     crate::log(format!("stream: {} kbps requested → Protect channel {name}", req.kbps));
 
-    // watchdog: the controller's RTCP keeps us going
+    // watchdog: the controller's RTCP keeps us going (and its reports are logged)
     let (sock, stop2, rtsp2) = (ep.video_sock.clone(), stop.clone(), rtsp_conn.clone());
+    let mut stats = RtcpStats::new("video", &ep.video_srtp_in, 90_000);
     std::thread::spawn(move || {
         let _ = sock.set_read_timeout(Some(Duration::from_secs(1)));
         let mut last = Instant::now();
         let mut buf = [0u8; 2048];
         while !stop2.load(Ordering::Relaxed) {
-            if sock.recv(&mut buf).is_ok() {
+            if let Ok(n) = sock.recv(&mut buf) {
                 last = Instant::now();
+                stats.feed(&buf[..n]);
             }
             if last.elapsed() > Duration::from_secs(30) {
                 crate::log("stream: no RTCP from the controller for 30 s, stopping".into());
@@ -232,6 +234,74 @@ pub fn start(ep: Endpoint, req: Request, channels: &Channels, protect: Option<Ar
         crate::log("stream: ended".into());
     });
     Ok(h)
+}
+
+/// The controller's RTCP about what it receives from us: receiver reports (loss, jitter) and
+/// feedback (keyframe requests, NACKs), summarised in the log: every 10 s while there are
+/// problems, otherwise every 60 s.
+struct RtcpStats {
+    name: &'static str,
+    rx: crate::srtp::Receiver,
+    clock: u32,
+    since: Instant,
+    reports: u32,
+    loss_max: u8,
+    lost_total: i32,
+    jitter_max: u32,
+    pli: u32,
+    nack: u32,
+}
+
+impl RtcpStats {
+    fn new(name: &'static str, key: &[u8], clock: u32) -> Self {
+        RtcpStats { name, rx: crate::srtp::Receiver::new(key), clock, since: Instant::now(), reports: 0, loss_max: 0, lost_total: 0, jitter_max: 0, pli: 0, nack: 0 }
+    }
+
+    fn feed(&mut self, pkt: &[u8]) {
+        if pkt.len() < 8 || !(200..=206).contains(&pkt[1]) {
+            return;
+        }
+        let Some(c) = self.rx.unprotect_rtcp(pkt) else { return };
+        let mut p = c.as_slice();
+        while p.len() >= 8 {
+            let len = (u16::from_be_bytes([p[2], p[3]]) as usize + 1) * 4;
+            let Some(pk) = p.get(..len) else { break };
+            let (count, pt) = ((pk[0] & 0x1f) as usize, pk[1]);
+            let blocks = match pt {
+                200 => pk.get(28..),
+                201 => pk.get(8..),
+                _ => None,
+            };
+            for b in blocks.unwrap_or(&[]).chunks_exact(24).take(count) {
+                self.reports += 1;
+                self.loss_max = self.loss_max.max(b[4]);
+                self.lost_total = (i32::from_be_bytes([b[5], b[6], b[7], 0])) >> 8;
+                self.jitter_max = self.jitter_max.max(u32::from_be_bytes(b[12..16].try_into().unwrap()));
+            }
+            match (pt, count) {
+                (205, 1) => self.nack += 1,
+                (206, 1) | (206, 4) => self.pli += 1,
+                _ => {}
+            }
+            p = &p[len..];
+        }
+        let jitter_ms = self.jitter_max * 1000 / self.clock.max(1);
+        let trouble = self.loss_max > 0 || self.pli > 0 || self.nack > 0 || jitter_ms > 40;
+        let every = if trouble { 10 } else { 60 };
+        if self.reports > 0 && self.since.elapsed() >= Duration::from_secs(every) {
+            crate::log(format!(
+                "rtcp {}: loss up to {:.1}% (total {}), jitter up to {} ms, keyframe requests {}, NACKs {}",
+                self.name,
+                self.loss_max as f32 * 100.0 / 256.0,
+                self.lost_total,
+                jitter_ms,
+                self.pli,
+                self.nack
+            ));
+            self.since = Instant::now();
+            (self.reports, self.loss_max, self.jitter_max, self.pli, self.nack) = (0, 0, 0, 0, 0);
+        }
+    }
 }
 
 fn run(ep: &Endpoint, req: &Request, url: &str, stop: &AtomicBool, conn: &Mutex<Option<TcpStream>>) -> Result<(), String> {
@@ -321,13 +391,15 @@ fn talkback(sock: Arc<std::net::UdpSocket>, key: Vec<u8>, protect: &Protect, sto
     let Ok(out) = std::net::UdpSocket::bind(("0.0.0.0", 0)) else { return };
     let _ = sock.set_read_timeout(Some(Duration::from_secs(1)));
     let mut srtp = srtp::Receiver::new(&key);
+    let mut stats = RtcpStats::new("audio", &key, 48_000);
     let mut rw = Rewriter::new(96, OsRng.next_u32());
     let (mut buf, mut got, mut bad) = ([0u8; 2048], 0u64, 0u64);
     while !stop.load(Ordering::Relaxed) {
         let Ok(n) = sock.recv(&mut buf) else { continue };
         let p = &buf[..n];
-        if n < 12 || (200..=204).contains(&p[1]) {
-            continue; // RTCP
+        if n < 12 || (200..=206).contains(&p[1]) {
+            stats.feed(p); // RTCP about our audio
+            continue;
         }
         let Some(rtp) = srtp.unprotect_rtp(p) else {
             bad += 1;

@@ -108,13 +108,33 @@ impl Sender {
 /// Unprotects one remote sender's SRTP (the controller's microphone).
 pub struct Receiver {
     rtp: Keys,
+    rtcp: Keys,
     roc: u32,
     last_seq: Option<u16>,
 }
 
 impl Receiver {
     pub fn new(master: &[u8]) -> Receiver {
-        Receiver { rtp: Keys::new(master, 0), roc: 0, last_seq: None }
+        Receiver { rtp: Keys::new(master, 0), rtcp: Keys::new(master, 3), roc: 0, last_seq: None }
+    }
+
+    /// SRTCP packet → RTCP compound packet; None if too short or the tag is wrong.
+    pub fn unprotect_rtcp(&self, pkt: &[u8]) -> Option<Vec<u8>> {
+        if pkt.len() < 8 + 4 + 10 {
+            return None;
+        }
+        let (body, tag) = pkt.split_at(pkt.len() - 10);
+        if self.rtcp.tag(&[body]) != tag {
+            return None;
+        }
+        let (rtcp, e_index) = body.split_at(body.len() - 4);
+        let e_index = u32::from_be_bytes(e_index.try_into().ok()?);
+        let mut out = rtcp.to_vec();
+        if e_index & 0x8000_0000 != 0 {
+            let ssrc = u32::from_be_bytes(out[4..8].try_into().ok()?);
+            aes_cm(&self.rtcp.enc, &self.rtcp.iv(ssrc, (e_index & 0x7fff_ffff) as u64), &mut out[8..]);
+        }
+        Some(out)
     }
 
     /// SRTP packet → RTP packet (header + plain payload); None if too short or the tag is wrong.
@@ -150,6 +170,20 @@ mod tests {
 
     fn hex(s: &str) -> Vec<u8> {
         (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
+    }
+
+    #[test]
+    fn rtcp_roundtrip() {
+        let master = [7u8; 30];
+        let rr = [0x81, 201, 0, 7, 1, 2, 3, 4, 9, 9, 9, 9, 0x10, 0, 0, 5, 0, 0, 1, 0, 0, 0, 0, 90, 0, 0, 0, 0, 0, 0, 0, 0];
+        let mut tx = Sender::new(&master);
+        let rx = Receiver::new(&master);
+        let p = tx.protect_rtcp(&rr);
+        assert_ne!(&p[8..32], &rr[8..]);
+        assert_eq!(rx.unprotect_rtcp(&p).unwrap(), rr);
+        let mut bad = p.clone();
+        bad[10] ^= 1;
+        assert!(rx.unprotect_rtcp(&bad).is_none());
     }
 
     /// RFC 3711 appendix B.3.
