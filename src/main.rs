@@ -331,8 +331,9 @@ fn onvif_info(cfg: &Config) {
         if let Ok(u) = o.stream_uri(&p.token) {
             println!("  rtsp:     {}", mask(&u));
         }
-        if let Ok(u) = o.snapshot_uri(&p.token) {
-            println!("  snapshot: {}", mask(&u));
+        match o.snapshot_uri(&p.token) {
+            Ok(u) => println!("  snapshot: {}", mask(&u)),
+            Err(e) => println!("  snapshot: none ({e})"),
         }
     }
     println!("events for 30 s (move in front of the camera):");

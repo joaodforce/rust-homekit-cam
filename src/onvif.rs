@@ -21,6 +21,8 @@ pub struct Onvif {
     /// camera clock − our clock, seconds
     offset: i64,
     media: String,
+    /// Media2 (ver20) service, if offered: some cameras implement GetSnapshotUri only there.
+    media2: Option<String>,
     events: Option<String>,
 }
 
@@ -126,7 +128,7 @@ impl Onvif {
     pub fn connect(url: &str, user: &str, pass: &str) -> Result<Onvif, String> {
         let base = url.trim_end_matches('/');
         let device = if base.contains("/onvif/") { base.to_string() } else { format!("{base}/onvif/device_service") };
-        let mut o = Onvif { device, user: user.into(), pass: pass.into(), offset: 0, media: String::new(), events: None };
+        let mut o = Onvif { device, user: user.into(), pass: pass.into(), offset: 0, media: String::new(), media2: None, events: None };
         // clock first: unauthenticated by the standard
         if let Ok(doc) = o.call_raw(&o.device.clone(), "", "<tds:GetSystemDateAndTime/>") {
             let d = roxmltree::Document::parse(&doc).map_err(|e| e.to_string())?;
@@ -145,6 +147,18 @@ impl Onvif {
         };
         o.media = xaddr("Media").ok_or("ONVIF: no media service")?;
         o.events = xaddr("Events");
+        // GetCapabilities doesn't list Media2; GetServices does (optional, best effort)
+        if let Ok(x) = o.call(&o.device.clone(), "<tds:GetServices><tds:IncludeCapability>false</tds:IncludeCapability></tds:GetServices>") {
+            if let Ok(d) = roxmltree::Document::parse(&x) {
+                o.media2 = d
+                    .descendants()
+                    .filter(|n| n.tag_name().name() == "Service")
+                    .find(|n| child(*n, "Namespace").and_then(|x| x.text()).map(str::trim) == Some("http://www.onvif.org/ver20/media/wsdl"))
+                    .and_then(|n| child(n, "XAddr"))
+                    .and_then(|x| x.text())
+                    .map(|t| t.trim().to_string());
+            }
+        }
         Ok(o)
     }
 
@@ -153,9 +167,13 @@ impl Onvif {
         let xml = envelope(header, body);
         let r = crate::httpc::request("POST", &creds_url, Some("application/soap+xml; charset=utf-8"), xml.as_bytes(), Duration::from_secs(15))?;
         let text = String::from_utf8_lossy(&r.body).into_owned();
+        // some cameras send faults with HTTP 200
+        let fault = || roxmltree::Document::parse(&text).ok().filter(|d| d.descendants().any(|n| n.tag_name().name() == "Fault")).map(|d| text_of_fault(&d).unwrap_or_default());
         if r.status != 200 {
-            let reason = roxmltree::Document::parse(&text).ok().and_then(|d| text_of_fault(&d)).unwrap_or_default();
-            return Err(format!("ONVIF: HTTP {} {reason}", r.status));
+            return Err(format!("ONVIF: HTTP {} {}", r.status, fault().unwrap_or_default()));
+        }
+        if let Some(reason) = fault() {
+            return Err(format!("ONVIF: {reason}"));
         }
         Ok(text)
     }
@@ -201,10 +219,20 @@ impl Onvif {
         text(&d, "Uri").ok_or_else(|| "ONVIF: no stream URI".into())
     }
 
+    /// Media (ver10) GetSnapshotUri, falling back to Media2 (ver20) when the camera has it.
     pub fn snapshot_uri(&self, profile: &str) -> Result<String, String> {
-        let x = self.call(&self.media, &format!("<trt:GetSnapshotUri><trt:ProfileToken>{}</trt:ProfileToken></trt:GetSnapshotUri>", xml_escape(profile)))?;
-        let d = roxmltree::Document::parse(&x).map_err(|e| e.to_string())?;
-        text(&d, "Uri").ok_or_else(|| "ONVIF: no snapshot URI".into())
+        let uri = |x: Result<String, String>| -> Result<String, String> {
+            let x = x?;
+            let d = roxmltree::Document::parse(&x).map_err(|e| e.to_string())?;
+            text(&d, "Uri").filter(|u| !u.is_empty()).ok_or_else(|| "ONVIF: no snapshot URI".into())
+        };
+        let token = xml_escape(profile);
+        let v1 = uri(self.call(&self.media, &format!("<trt:GetSnapshotUri><trt:ProfileToken>{token}</trt:ProfileToken></trt:GetSnapshotUri>")));
+        match (&v1, &self.media2) {
+            (Err(e1), Some(m2)) => uri(self.call(m2, &format!("<tr2:GetSnapshotUri xmlns:tr2=\"http://www.onvif.org/ver20/media/wsdl\"><tr2:ProfileToken>{token}</tr2:ProfileToken></tr2:GetSnapshotUri>")))
+                .map_err(|e2| format!("{e1}; Media2: {e2}")),
+            _ => v1,
+        }
     }
 
     // --------------------------------------------------------------------------- events

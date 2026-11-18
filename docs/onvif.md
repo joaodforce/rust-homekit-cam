@@ -33,7 +33,7 @@ it sends.
 | | From ONVIF | Override |
 |---|---|---|
 | Streams | the H.264 profiles: the largest becomes `high` (and `medium`), the smallest `low`; the login is added to the URLs | set `[rtsp]` yourself |
-| Snapshots | the profile's snapshot URI | `snapshot_url` (top level), or `snapshot = false` |
+| Snapshots | the profile's snapshot URI (Media, then Media2) | `snapshot_url` (top level), or `snapshot = false` |
 | Motion | events whose topic contains one of `motion_topics` (default `["Motion"]`): `VideoSource/MotionAlarm`, `RuleEngine/CellMotionDetector/Motion`… true turns the Motion Sensor on, false off | `motion_topics = [...]`, `motion = false` (top level) |
 | Ring | events whose topic contains one of `ring_topics` with a true value (none by default; e.g. a doorbell's `Device/Trigger/DigitalInput`) | `ring_topics = [...]` |
 
@@ -51,7 +51,9 @@ Switch the camera's streams to **H.264** in its web UI; H.265 profiles are skipp
 
 ## Brand notes
 
-- **Intelbras / Dahua**: ONVIF on port 80. Their ONVIF snapshot URI is missing or broken; use
+- **Intelbras / Dahua**: ONVIF on port 80. Older firmware doesn't implement GetSnapshotUri at all
+  (a VIP-1130-B on 2.680, 2021, answers "This optional method is not implemented" in both Media
+  and Media2; `onvif-info` shows the reason). Use
   `snapshot_url = "http://user:pass@<camera>/cgi-bin/snapshot.cgi"` (Digest, handled). Motion
   arrives as `VideoSource/MotionAlarm`.
 - The camera's clock may be off: the login uses the camera's own time, so that's fine.
