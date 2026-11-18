@@ -64,6 +64,7 @@ pub struct Camera {
     muted: Mutex<(bool, bool, u8)>, // microphone, speaker, volume
     channels: Channels,
     protect: Option<Arc<crate::protect::Protect>>,
+    snapshots: Option<Arc<crate::snapshot::Snapshots>>,
     streams: Mutex<HashMap<Vec<u8>, stream::Handle>>,
 }
 
@@ -79,8 +80,14 @@ impl Camera {
             muted: Mutex::new((false, false, 100)),
             channels,
             protect,
+            snapshots: None,
             streams: Mutex::new(HashMap::new()),
         }
+    }
+
+    pub fn with_snapshots(mut self, s: Option<Arc<crate::snapshot::Snapshots>>) -> Self {
+        self.snapshots = s;
+        self
     }
 
     /// Manufacturer and model shown in the Home app (accessory details).
@@ -350,6 +357,10 @@ impl Accessory for Camera {
             }
             _ => Err(READ_ONLY),
         }
+    }
+
+    fn snapshot(&self, _w: u32, _h: u32) -> Result<Arc<Vec<u8>>, String> {
+        self.snapshots.as_ref().ok_or("no snapshot source configured")?.get()
     }
 
     fn closed(&self, conn: Conn) {

@@ -54,6 +54,10 @@ pub trait Accessory: Send + Sync + 'static {
     fn write(&self, conn: Conn, iid: u64, value: &Value) -> Result<Option<Value>, i64>;
     /// The connection closed (stop its streams).
     fn closed(&self, _conn: Conn) {}
+    /// A still image (JPEG) for `POST /resource`; the size is a hint.
+    fn snapshot(&self, _width: u32, _height: u32) -> Result<std::sync::Arc<Vec<u8>>, String> {
+        Err("no snapshot source".into())
+    }
 }
 
 struct Session {
@@ -198,7 +202,9 @@ impl Server {
 
         log(format!("connection {n} from {peer}"));
         while let Ok(Some(req)) = http::read_request(&mut reader) {
-            log(format!("connection {n}: {} {} ({} bytes)", req.method, req.path, req.body.len()));
+            if !req.path.starts_with("/characteristics") && req.path != "/resource" {
+                log(format!("connection {n}: {} {} ({} bytes)", req.method, req.path, req.body.len()));
+            }
             let mut encrypt_with = None;
             let resp = match (req.method.as_str(), req.path.split('?').next().unwrap_or("")) {
                 ("POST", "/pair-setup") => {
@@ -339,8 +345,18 @@ impl Server {
             }
             ("PUT", "/prepare") => hap_json(200, "OK", &json!({"status": 0})),
             ("POST", "/resource") => {
-                // snapshots: not yet (milestone 5)
-                Response::status(404, "Not Found")
+                let v: Value = serde_json::from_slice(&req.body).unwrap_or_default();
+                if v["resource-type"] != "image" {
+                    return Response::status(404, "Not Found");
+                }
+                let (w, h) = (v["image-width"].as_u64().unwrap_or(0) as u32, v["image-height"].as_u64().unwrap_or(0) as u32);
+                match hk.acc.snapshot(w, h) {
+                    Ok(img) => Response::ok().body("image/jpeg", img.to_vec()),
+                    Err(e) => {
+                        log(format!("snapshot: {e}"));
+                        Response::status(500, "Internal Server Error")
+                    }
+                }
             }
             ("POST", "/pairings") => {
                 let st = hk.store.lock().unwrap().clone();

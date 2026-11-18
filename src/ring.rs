@@ -11,11 +11,16 @@ use std::time::{Duration, Instant};
 pub struct Ringer {
     pub server: Server,
     pub iid: u64,
+    /// dropped on a ring so the notification's picture is fresh
+    pub snapshots: Option<std::sync::Arc<crate::snapshot::Snapshots>>,
 }
 
 impl Ringer {
     pub fn ring(&self) {
         crate::log("ring".into());
+        if let Some(s) = &self.snapshots {
+            s.invalidate();
+        }
         self.server.notify(self.iid, serde_json::json!(0)); // single press
     }
 }

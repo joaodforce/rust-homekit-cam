@@ -43,7 +43,7 @@ fn split_creds(url: &str) -> (String, Option<(String, String)>) {
     }
 }
 
-fn percent_decode(s: &str) -> String {
+pub(crate) fn percent_decode(s: &str) -> String {
     let b = s.as_bytes();
     let mut out = Vec::new();
     let mut i = 0;
@@ -68,7 +68,7 @@ fn md5_hex(s: &str) -> String {
 
 /// The Authorization header for a challenge (Digest, RFC 2617 without qop, as cameras use;
 /// or Basic).
-fn authorization(challenge: &str, user: &str, pass: &str, method: &str, uri: &str) -> String {
+pub(crate) fn authorization(challenge: &str, user: &str, pass: &str, method: &str, uri: &str) -> String {
     let param = |name: &str| {
         let key = format!("{name}=\"");
         challenge.find(&key).map(|i| &challenge[i + key.len()..]).and_then(|r| r.split('"').next()).unwrap_or("").to_string()

@@ -6,9 +6,11 @@
 mod camera;
 mod h264;
 mod hap;
+mod httpc;
 mod protect;
 mod ring;
 mod rtsp;
+mod snapshot;
 mod srtp;
 mod stream;
 mod tlv;
@@ -48,7 +50,9 @@ struct Config {
     ring_listen: Option<String>,
     #[serde(default)]
     ring_token: String,
-    /// Optional UniFi Protect backend (two-way audio).
+    /// A JPEG snapshot URL (http://[user:pass@]host/path); default with [protect]: Protect's.
+    snapshot_url: Option<String>,
+    /// Optional UniFi Protect backend (two-way audio, snapshots).
     protect: Option<ProtectCfg>,
     /// Protect RTSP URLs (rtsp://<nvr>:7447/<alias>) per channel, for live view.
     #[serde(default)]
@@ -97,13 +101,26 @@ fn main() {
             if protect.is_none() {
                 log("no [protect]: two-way audio off".into());
             }
-            let cam = Arc::new(camera::Camera::new(&cfg.name, cfg.doorbell, cfg.rtsp.clone(), protect).with_info(cfg.manufacturer.clone(), cfg.model.clone()));
+            let snapshots = match (&cfg.snapshot_url, &protect) {
+                (Some(u), _) => Some(snapshot::Source::Url(u.clone())),
+                (None, Some(p)) => Some(snapshot::Source::Protect(p.clone())),
+                _ => None,
+            }
+            .map(|s| Arc::new(snapshot::Snapshots::new(s)));
+            if snapshots.is_none() {
+                log("no snapshot_url or [protect]: no snapshots (blank tiles)".into());
+            }
+            let cam = Arc::new(
+                camera::Camera::new(&cfg.name, cfg.doorbell, cfg.rtsp.clone(), protect)
+                    .with_info(cfg.manufacturer.clone(), cfg.model.clone())
+                    .with_snapshots(snapshots.clone()),
+            );
             let server = hap::Server::start(cam, cfg.hap_port, cfg.state_dir).unwrap_or_else(|e| die(e));
             if let Some(listen) = &cfg.ring_listen {
                 if cfg.ring_token.is_empty() {
                     die("ring_listen needs ring_token".into());
                 }
-                let ringer = ring::Ringer { server: server.clone(), iid: camera::SWITCH_EVENT };
+                let ringer = ring::Ringer { server: server.clone(), iid: camera::SWITCH_EVENT, snapshots: snapshots.clone() };
                 ring::http(listen, cfg.ring_token.clone(), ringer).unwrap_or_else(|e| die(e));
             }
             loop {

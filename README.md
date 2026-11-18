@@ -13,6 +13,7 @@ vendor-specific extras (UniFi Protect today) are optional backends:
 | Camera audio | ✓ if the camera streams Opus | ✓ (Protect adds an Opus track) |
 | Two-way audio | not yet (RTSP back-channel / ONVIF planned) | ✓ (talk-back session, Opus passthrough) |
 | Doorbell ring | ✓ `POST /ring` from anything (HA, Node-RED, a webhook) | ✓ same |
+| Snapshots (tiles, notifications) | ✓ from the camera's JPEG URL (`snapshot_url`) | ✓ from the Protect API |
 | RTSP login | Basic / Digest from `rtsp://user:pass@…` | not needed (alias URLs) |
 
 Status: early but working. Pairing, the doorbell ring, live video, camera audio and two-way
@@ -31,7 +32,10 @@ One HAP accessory per camera; a doorbell is category 18 (Video Doorbell), a came
 | Microphone (0x112) | camera audio (mute) |
 | Speaker (0x113) | two-way audio (mute, volume) |
 
-Later: Motion Sensor (from the same pluggable event sources as the ring), snapshots, and
+Snapshots (`POST /resource`): the camera's or NVR's own JPEG, returned as is (no decoding),
+cached for 5 s against the Home app's polling and refreshed on a ring.
+
+Later: Motion Sensor (from the same pluggable event sources as the ring) and
 **HomeKit Secure Video**
 (Camera Operating Mode, Camera Event Recording Management, Data Stream: fMP4 fragments of the same
 H.264, still no transcoding).
@@ -116,7 +120,8 @@ the camera, it does not relay.
 3. Camera audio (Opus passthrough).
 4. Two-way audio (Protect talk-back).
 5. Deploy as a service.
-6. Later: several cameras per process, RTSP back-channel talk-back, motion sensor, snapshots,
+6. Snapshots.
+7. Later: several cameras per process, RTSP back-channel talk-back, motion sensor,
    HomeKit Secure Video, optional audio transcode for AAC-only cameras.
 
 ## License

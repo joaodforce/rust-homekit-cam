@@ -11,6 +11,10 @@ state_dir = "/var/lib/rust-homekit-cam"
 ring_listen = "0.0.0.0:8780"
 ring_token = "change-me"
 
+# Snapshots for the Home app: the camera's JPEG URL (plain http, Basic/Digest from the URL).
+# With [protect] and no snapshot_url, Protect's snapshot API is used.
+# snapshot_url = "http://user:password@192.0.2.10/cgi-bin/snapshot.cgi"
+
 # The camera's H.264 RTSP streams: one URL is enough; with several, the one that fits the
 # bitrate the iPhone asks for is used. Credentials go in the URL (Basic or Digest).
 [rtsp]
@@ -23,7 +27,7 @@ low = "rtsp://user:password@192.0.2.10:554/stream2"      # sub stream
 # RTSP: Protect → camera → Settings → Advanced → RTSP; plain rtsp://<console>:7447/<alias>,
 # no credentials (the alias is the secret); high/medium/low = the camera's three channels.
 #
-# Two-way audio: an API key (UniFi OS → Settings → Control Plane → Integrations), the camera's
+# Two-way audio and snapshots: an API key (UniFi OS → Settings → Control Plane → Integrations), the camera's
 # id, and the console's certificate fingerprint (logged on first use if unset). The service
 # host must reach the camera on UDP 7004 (mind camera-VLAN firewall rules).
 # [protect]

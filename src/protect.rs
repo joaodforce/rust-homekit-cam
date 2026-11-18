@@ -95,7 +95,7 @@ impl Protect {
         Ok(Protect { host: host.to_string(), key: key.to_string(), camera: camera.to_string(), tls: Arc::new(tls), seen })
     }
 
-    fn request(&self, method: &str, path: &str, body: &str) -> Result<Value, String> {
+    fn request(&self, method: &str, path: &str, body: &str, accept: &str) -> Result<Vec<u8>, String> {
         let addr = if self.host.contains(':') { self.host.clone() } else { format!("{}:443", self.host) };
         let tcp = TcpStream::connect(&addr).map_err(|e| format!("protect {addr}: {e}"))?;
         tcp.set_read_timeout(Some(Duration::from_secs(10))).ok();
@@ -103,32 +103,38 @@ impl Protect {
         let conn = rustls::ClientConnection::new(self.tls.clone(), name).map_err(|e| e.to_string())?;
         let mut s = rustls::StreamOwned::new(conn, tcp);
         let req = format!(
-            "{method} /proxy/protect/integration/v1{path} HTTP/1.1\r\nHost: {}\r\nX-API-KEY: {}\r\nAccept: application/json\r\n\
+            "{method} /proxy/protect/integration/v1{path} HTTP/1.1\r\nHost: {}\r\nX-API-KEY: {}\r\nAccept: {accept}\r\n\
              Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
             self.host,
             self.key,
             body.len()
         );
         s.write_all(req.as_bytes()).map_err(|e| format!("protect: {e}"))?;
-        let mut resp = Vec::new();
+        let mut raw = Vec::new();
         // the console closes without close_notify sometimes: keep what arrived
-        let _ = s.read_to_end(&mut resp);
+        let _ = s.read_to_end(&mut raw);
         if let Some(fp) = self.seen.lock().unwrap().take() {
-            crate::log(format!("protect: certificate not pinned; to pin it set protect_cert_sha256 = \"{fp}\""));
+            crate::log(format!("protect: certificate not pinned; to pin it set [protect] cert_sha256 = \"{fp}\""));
         }
-        let text = String::from_utf8_lossy(&resp);
-        let (head, body) = text.split_once("\r\n\r\n").ok_or("protect: no HTTP response")?;
-        let status: u16 = head.split_whitespace().nth(1).and_then(|c| c.parse().ok()).unwrap_or(0);
-        let body = if head.to_ascii_lowercase().contains("transfer-encoding: chunked") { dechunk(body) } else { body.to_string() };
-        if status != 200 {
-            return Err(format!("protect {method} {path}: HTTP {status}"));
+        let r = crate::httpc::parse(&raw).map_err(|e| format!("protect: {e}"))?;
+        if r.status != 200 {
+            return Err(format!("protect {method} {path}: HTTP {}", r.status));
         }
-        serde_json::from_str(&body).map_err(|e| format!("protect: {e}"))
+        Ok(r.body)
+    }
+
+    fn request_json(&self, method: &str, path: &str, body: &str) -> Result<Value, String> {
+        serde_json::from_slice(&self.request(method, path, body, "application/json")?).map_err(|e| format!("protect: {e}"))
+    }
+
+    /// The camera's current snapshot (JPEG).
+    pub fn snapshot(&self) -> Result<Vec<u8>, String> {
+        self.request("GET", &format!("/cameras/{}/snapshot", self.camera), "", "image/jpeg")
     }
 
     /// Open a talk-back session on the camera.
     pub fn talkback(&self) -> Result<Talkback, String> {
-        let v = self.request("POST", &format!("/cameras/{}/talkback-session", self.camera), "{}")?;
+        let v = self.request_json("POST", &format!("/cameras/{}/talkback-session", self.camera), "{}")?;
         parse_talkback(&v)
     }
 }
@@ -139,18 +145,6 @@ fn parse_talkback(v: &Value) -> Result<Talkback, String> {
     Ok(Talkback { addr, codec: v["codec"].as_str().unwrap_or("").to_string(), rate: v["samplingRate"].as_u64().unwrap_or(0) as u32 })
 }
 
-fn dechunk(mut s: &str) -> String {
-    let mut out = String::new();
-    while let Some((len, rest)) = s.split_once("\r\n") {
-        let n = usize::from_str_radix(len.trim(), 16).unwrap_or(0);
-        if n == 0 || rest.len() < n {
-            break;
-        }
-        out.push_str(&rest[..n]);
-        s = rest[n..].trim_start_matches("\r\n");
-    }
-    out
-}
 
 #[cfg(test)]
 mod tests {
@@ -161,7 +155,6 @@ mod tests {
         let v = serde_json::json!({"url": "rtp://192.0.2.10:7004", "codec": "opus", "samplingRate": 24000, "bitsPerSample": 16});
         let t = parse_talkback(&v).unwrap();
         assert_eq!((t.addr.to_string().as_str(), t.codec.as_str(), t.rate), ("192.0.2.10:7004", "opus", 24000));
-        assert_eq!(dechunk("5\r\nhello\r\n3\r\nabc\r\n0\r\n\r\n"), "helloabc");
         assert!(Protect::new("h", "k", "c", Some("00:11")).is_err());
     }
 }
