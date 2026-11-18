@@ -11,12 +11,13 @@ vendor-specific extras (UniFi Protect today) are optional backends:
 |---|---|---|
 | Live video | ✓ (one URL, or up to three by bitrate) | ✓ (High / Medium / Low channels) |
 | Camera audio | ✓ if the camera streams Opus | ✓ (Protect adds an Opus track) |
-| Two-way audio | not yet (RTSP back-channel / ONVIF planned) | ✓ (talk-back session) |
+| Two-way audio | not yet (RTSP back-channel / ONVIF planned) | ✓ (talk-back session, Opus passthrough) |
 | Doorbell ring | ✓ `POST /ring` from anything (HA, Node-RED, a webhook) | ✓ same |
 | RTSP login | Basic / Digest from `rtsp://user:pass@…` | not needed (alias URLs) |
 
-Status: early. Pairing, the doorbell ring, live video and camera audio work (tested with a
-UniFi Protect Doorbell Lite and an iPhone). Two-way audio is written, test pending.
+Status: early but working. Pairing, the doorbell ring, live video, camera audio and two-way
+audio all work, none of them transcoded (tested with a UniFi Protect Doorbell Lite, iPhone and
+home hubs, running in a 256 MB Debian LXC).
 
 ## What it exposes
 
