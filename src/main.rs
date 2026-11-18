@@ -35,6 +35,8 @@ struct ProtectCfg {
     #[serde(default = "smart")]
     motion: protect::MotionKind,
     token: String,
+    /// `rust-homekit-cam protect-cameras` lists them
+    #[serde(default)]
     camera_id: String,
     host: Option<String>,
     cert_sha256: Option<String>,
@@ -51,8 +53,9 @@ struct Config {
     model: Option<String>,
     #[serde(default = "default_port")]
     hap_port: u16,
-    #[serde(default = "default_state")]
-    state_dir: PathBuf,
+    /// Pairing and recording state. Default: systemd's $STATE_DIRECTORY when run as a service,
+    /// else /var/lib/rust-homekit-cam/<config file name> (so `code` / `reset` find it too).
+    state_dir: Option<PathBuf>,
     /// HomeKit Secure Video: on by default with the Motion Sensor (its trigger)
     hksv: Option<bool>,
     /// Motion Sensor: on by default when there is a Protect backend; `POST /motion` feeds it too.
@@ -85,13 +88,18 @@ fn motion_hold() -> u64 {
 fn default_port() -> u16 {
     51830
 }
-fn default_state() -> PathBuf {
-    "/var/lib/rust-homekit-cam".into()
-}
 
 fn load(path: &str) -> Config {
     let text = std::fs::read_to_string(path).unwrap_or_else(|e| die(format!("{path}: {e}")));
-    toml::from_str(&text).unwrap_or_else(|e| die(format!("{path}: {e}")))
+    let mut cfg: Config = toml::from_str(&text).unwrap_or_else(|e| die(format!("{path}: {e}")));
+    if cfg.state_dir.is_none() {
+        let instance = std::path::Path::new(path).file_stem().and_then(|s| s.to_str()).unwrap_or("default").to_string();
+        cfg.state_dir = Some(match std::env::var_os("STATE_DIRECTORY") {
+            Some(d) => PathBuf::from(d),
+            None => PathBuf::from("/var/lib/rust-homekit-cam").join(instance),
+        });
+    }
+    cfg
 }
 
 fn die(msg: String) -> ! {
@@ -108,13 +116,17 @@ fn main() {
     let cfg = load(path);
     match cmd {
         "code" => {
-            let (code, paired) = hap::code(cfg.state_dir);
+            let (code, paired) = hap::code(cfg.state_dir.clone().unwrap());
             println!("{code} ({})", if paired { "paired" } else { "not paired" });
         }
         "probe" => probe(&cfg.rtsp),
+        "protect-cameras" => protect_cameras(&cfg),
         "record-test" => record_test(&cfg.rtsp, args.get(3).map(String::as_str).unwrap_or("record-test.mp4")),
-        "reset" =>println!("removed {} pairing(s); restart the service", hap::reset(cfg.state_dir)),
+        "reset" =>println!("removed {} pairing(s); restart the service", hap::reset(cfg.state_dir.clone().unwrap())),
         "serve" => {
+            if cfg.protect.as_ref().is_some_and(|p| p.camera_id.is_empty()) {
+                die("[protect] camera_id is missing (rust-homekit-cam protect-cameras <config> lists them)".into());
+            }
             let protect = cfg.protect.as_ref().map(|p| {
                 let host = p.host.clone().or_else(|| rtsp_host(&cfg.rtsp)).unwrap_or_else(|| die("[protect] host?".into()));
                 Arc::new(protect::Protect::new(&host, &p.token, &p.camera_id, p.cert_sha256.as_deref()).unwrap_or_else(|e| die(e)))
@@ -135,7 +147,7 @@ fn main() {
             let hksv = (cfg.hksv.unwrap_or(motion_state.is_some()) && motion_state.is_some())
                 .then(|| cfg.rtsp.pick(2000).map(|(_, u)| u.to_string()))
                 .flatten()
-                .map(|url| hksv::Hksv::new(cfg.doorbell, cfg.state_dir.clone(), url).unwrap_or_else(|e| die(e)));
+                .map(|url| hksv::Hksv::new(cfg.doorbell, cfg.state_dir.clone().unwrap(), url).unwrap_or_else(|e| die(e)));
             let cam = Arc::new(
                 camera::Camera::new(&cfg.name, cfg.doorbell, cfg.rtsp.clone(), protect.clone())
                     .with_info(cfg.manufacturer.clone(), cfg.model.clone())
@@ -143,7 +155,7 @@ fn main() {
                     .with_motion(motion_state.clone())
                     .with_hksv(hksv.clone()),
             );
-            let server = hap::Server::start(cam, cfg.hap_port, cfg.state_dir).unwrap_or_else(|e| die(e));
+            let server = hap::Server::start(cam, cfg.hap_port, cfg.state_dir.clone().unwrap()).unwrap_or_else(|e| die(e));
             let motion = motion_state.map(|st| events::Motion::new(camera::MOTION_DETECTED, st, std::time::Duration::from_secs(cfg.motion_hold)));
             let ev = Arc::new(events::Events::new(server.clone(), cfg.doorbell.then_some(camera::SWITCH_EVENT), snapshots.clone(), motion));
             if let (Some(p), Some(pc)) = (&protect, &cfg.protect) {
@@ -196,6 +208,24 @@ fn follow_protect(p: Arc<protect::Protect>, kind: protect::MotionKind, ev: Arc<e
 fn rtsp_host(ch: &stream::Channels) -> Option<String> {
     let url = ch.low.as_ref().or(ch.medium.as_ref()).or(ch.high.as_ref())?;
     Some(url.strip_prefix("rtsp://")?.split(['/', ':']).next()?.to_string())
+}
+
+/// `protect-cameras <config>`: every Protect camera with a config block to paste (needs only
+/// [protect] token, and host when there is no [rtsp] yet). Prints RTSP aliases: they are secrets.
+fn protect_cameras(cfg: &Config) {
+    let p = cfg.protect.as_ref().unwrap_or_else(|| die("needs a [protect] section with token (and host)".into()));
+    let host = p.host.clone().or_else(|| rtsp_host(&cfg.rtsp)).unwrap_or_else(|| die("[protect] host = \"<console address>\" is needed".into()));
+    let api = protect::Protect::new(&host, &p.token, "", p.cert_sha256.as_deref()).unwrap_or_else(|e| die(e));
+    for (id, name, speaker) in api.cameras().unwrap_or_else(|e| die(e)) {
+        println!("# ---- {name}{}", if speaker { " (has a speaker: two-way audio)" } else { "" });
+        println!("name = \"{name}\"\ndoorbell = false   # true for a doorbell");
+        println!("[rtsp]");
+        match api.rtsp_urls(&id) {
+            Ok(urls) if !urls.is_empty() => urls.iter().for_each(|(ch, u)| println!("{ch} = \"{u}\"")),
+            _ => println!("# RTSP is off for this camera: Protect → camera → Settings → Advanced → RTSP"),
+        }
+        println!("[protect]\ntoken = \"…\"\ncamera_id = \"{id}\"\nhost = \"{host}\"\n");
+    }
 }
 
 /// `record-test <config> <out.mp4>`: what HKSV would get: 4 s prebuffer + ~8 s live, as fMP4.

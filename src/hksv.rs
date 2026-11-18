@@ -104,6 +104,11 @@ impl Hksv {
         let s = self.saved.lock().unwrap().clone();
         let tmp = self.path.with_extension("tmp");
         if std::fs::write(&tmp, serde_json::to_vec_pretty(&s).unwrap()).is_ok() {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
+            }
             let _ = std::fs::rename(&tmp, &self.path);
         }
     }

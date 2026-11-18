@@ -1,18 +1,19 @@
-# Copy to /etc/rust-homekit-cam.toml (mode 0600). Never commit the real one: RTSP credentials,
-# API keys and the ring token are secrets.
+# One file per camera: /etc/rust-homekit-cam/<name>.toml (mode 0600), run by
+# rust-homekit-cam@<name>.service. Never commit a real one: RTSP credentials, API keys and the
+# ring token are secrets. Every key is explained in docs/configuration.md.
 name = "Doorbell"
 doorbell = true                  # false: a plain camera
 # manufacturer = "Acme"          # shown in the Home app's accessory details
 # model = "Doorbell 2000"
-hap_port = 51830
-state_dir = "/var/lib/rust-homekit-cam"
+hap_port = 51830                 # different for each camera on the same host
 
-# Motion Sensor (needed for HomeKit Secure Video later): default on with [protect];
+# Motion Sensor (the trigger for HomeKit Secure Video): default on with [protect];
 # set motion = true to feed it with POST /motion. Off motion_hold seconds after the last trigger.
 # motion = true
 # motion_hold = 10
 
 # Rings and motion arrive as POST /ring, POST /motion with "Authorization: Bearer <ring_token>" (from HA, a webhook…).
+# Optional; a different port for each camera on the same host.
 ring_listen = "0.0.0.0:8780"
 ring_token = "change-me"
 

@@ -1,0 +1,26 @@
+# One instance per camera:
+#   /etc/rust-homekit-cam/<name>.toml  (0600, root)  →  systemctl enable --now rust-homekit-cam@<name>
+# State (pairing, HKSV settings) goes to /var/lib/rust-homekit-cam/<name>.
+[Unit]
+Description=rust-homekit-cam %i - camera as a HomeKit accessory
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# The config (secrets, root-only) is handed to the dynamic user as a credential.
+LoadCredential=config:/etc/rust-homekit-cam/%i.toml
+ExecStart=/usr/local/bin/rust-homekit-cam serve ${CREDENTIALS_DIRECTORY}/config
+Restart=always
+RestartSec=2
+DynamicUser=yes
+StateDirectory=rust-homekit-cam/%i
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+
+[Install]
+WantedBy=multi-user.target

@@ -127,6 +127,36 @@ impl Protect {
         serde_json::from_slice(&self.request(method, path, body, "application/json")?).map_err(|e| format!("protect: {e}"))
     }
 
+    /// All cameras: (id, name, has a speaker).
+    pub fn cameras(&self) -> Result<Vec<(String, String, bool)>, String> {
+        let v = self.request_json("GET", "/cameras", "")?;
+        Ok(v.as_array()
+            .map(|a| {
+                a.iter()
+                    .map(|c| {
+                        let s = |k: &str| c[k].as_str().unwrap_or("").to_string();
+                        (s("id"), s("name"), c["featureFlags"]["hasSpeaker"].as_bool().unwrap_or(false))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default())
+    }
+
+    /// A camera's RTSP streams as plain `rtsp://<console>:7447/<alias>` URLs, per channel
+    /// ("high", "medium", "low"); channels without RTSP enabled are left out.
+    pub fn rtsp_urls(&self, camera: &str) -> Result<Vec<(String, String)>, String> {
+        let v = self.request_json("GET", &format!("/cameras/{camera}/rtsps-stream"), "")?;
+        let mut out = Vec::new();
+        for ch in ["high", "medium", "low"] {
+            if let Some(u) = v[ch].as_str() {
+                let alias = u.rsplit('/').next().unwrap_or("").split('?').next().unwrap_or("");
+                let host = self.host.split(':').next().unwrap_or("");
+                out.push((ch.to_string(), format!("rtsp://{host}:7447/{alias}")));
+            }
+        }
+        Ok(out)
+    }
+
     /// The camera's current snapshot (JPEG).
     pub fn snapshot(&self) -> Result<Vec<u8>, String> {
         self.request("GET", &format!("/cameras/{}/snapshot", self.camera), "", "image/jpeg")
