@@ -414,7 +414,7 @@ fn probe(ch: &stream::Channels) {
         let r = (|| -> Result<String, String> {
             let (mut c, tracks) = rtsp::Client::connect(url)?;
             let codecs: Vec<String> = tracks.iter().map(|t| format!("{}/{}", t.codec, t.clock)).collect();
-            let v = tracks.iter().find(|t| t.codec == "h264").ok_or("no h264")?;
+            let v = tracks.iter().find(|t| t.codec == "h264").ok_or_else(|| format!("no H.264 track ({}): switch the camera to H.264", codecs.join(", ")))?;
             c.setup(v, 0)?;
             let a = tracks.iter().find(|t| t.codec == "opus");
             if let Some(a) = a {

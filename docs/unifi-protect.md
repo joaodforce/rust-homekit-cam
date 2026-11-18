@@ -36,8 +36,13 @@ The first request logs the console's certificate fingerprint; put it in `cert_sh
 
 ## Video codec
 
-Protect can stream H.264 or H.265 per camera. This service needs **H.264**: set the camera's
-codec to H.264 in Protect. The change only takes effect after the camera restarts.
+Protect can stream H.264 or H.265 per camera. This service needs **H.264**: turn off
+**Enhanced Encoding** (H.265) in the camera's settings in Protect; newer models (G5 Turret
+Ultra, G6…) often ship with it on. The change only takes effect after the camera restarts.
+`rust-homekit-cam probe <config>` names the codecs each stream carries.
+
+If `protect-cameras` shows "couldn't read the RTSP streams: … HTTP 429", the console is
+rate-limiting; requests are retried, so running it again usually works.
 
 ## What the backend does
 
