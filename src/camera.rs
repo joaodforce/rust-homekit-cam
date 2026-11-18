@@ -54,6 +54,8 @@ pub struct Endpoint {
 
 pub struct Camera {
     name: String,
+    manufacturer: String,
+    model: String,
     doorbell: bool,
     /// per connection: the last SetupEndpoints answer (read back by controllers that don't use
     /// write-responses)
@@ -69,6 +71,8 @@ impl Camera {
     pub fn new(name: &str, doorbell: bool, channels: Channels, protect: Option<Arc<crate::protect::Protect>>) -> Self {
         Camera {
             name: name.into(),
+            manufacturer: "rust-homekit-cam".into(),
+            model: if doorbell { "Video Doorbell" } else { "Camera" }.into(),
             doorbell,
             setup_reply: Mutex::new(HashMap::new()),
             endpoints: Mutex::new(HashMap::new()),
@@ -77,6 +81,13 @@ impl Camera {
             protect,
             streams: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Manufacturer and model shown in the Home app (accessory details).
+    pub fn with_info(mut self, manufacturer: Option<String>, model: Option<String>) -> Self {
+        self.manufacturer = manufacturer.unwrap_or(self.manufacturer);
+        self.model = model.unwrap_or(self.model);
+        self
     }
 
     fn supported_video() -> Tlv {
@@ -251,8 +262,8 @@ impl Accessory for Camera {
         let mut list = vec![
             json!({"iid": 1, "type": "3E", "characteristics": [
                 ch(2, "14", "bool", PW, json!({})),
-                ch(3, "20", "string", PR, json!({"value": "Ubiquiti"})),
-                ch(4, "21", "string", PR, json!({"value": "UniFi Protect (rust-homekit-cam)"})),
+                ch(3, "20", "string", PR, json!({"value": self.manufacturer})),
+                ch(4, "21", "string", PR, json!({"value": self.model})),
                 ch(5, "23", "string", PR, json!({"value": self.name})),
                 ch(6, "30", "string", PR, json!({"value": serial})),
                 ch(7, "52", "string", PR, json!({"value": env!("CARGO_PKG_VERSION")})),

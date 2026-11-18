@@ -1,4 +1,5 @@
-//! rust-homekit-cam: a UniFi Protect camera / doorbell as a native HomeKit accessory.
+//! rust-homekit-cam: an RTSP camera / doorbell (UniFi Protect or any H.264 camera) as a native
+//! HomeKit accessory.
 //!
 //! `rust-homekit-cam serve <config.toml>` | `code <config.toml>` | `reset <config.toml>`
 
@@ -20,12 +21,25 @@ pub fn log(msg: String) {
     eprintln!("homekit-cam: {msg}");
 }
 
+/// Protect integration API: API key, camera id; the console's address (default: the RTSP
+/// host) and its certificate's SHA-256 fingerprint ("AB:CD:…").
+#[derive(Deserialize)]
+struct ProtectCfg {
+    token: String,
+    camera_id: String,
+    host: Option<String>,
+    cert_sha256: Option<String>,
+}
+
 #[derive(Deserialize)]
 struct Config {
     /// Name in the Home app.
     name: String,
     #[serde(default = "yes")]
     doorbell: bool,
+    /// Shown in the Home app's accessory details.
+    manufacturer: Option<String>,
+    model: Option<String>,
     #[serde(default = "default_port")]
     hap_port: u16,
     #[serde(default = "default_state")]
@@ -34,12 +48,8 @@ struct Config {
     ring_listen: Option<String>,
     #[serde(default)]
     ring_token: String,
-    /// Protect integration API (two-way audio): API key, camera id; the console's address
-    /// (default: the RTSP host) and its certificate's SHA-256 fingerprint ("AB:CD:…").
-    protect_token: Option<String>,
-    protect_camera_id: Option<String>,
-    protect_host: Option<String>,
-    protect_cert_sha256: Option<String>,
+    /// Optional UniFi Protect backend (two-way audio).
+    protect: Option<ProtectCfg>,
     /// Protect RTSP URLs (rtsp://<nvr>:7447/<alias>) per channel, for live view.
     #[serde(default)]
     rtsp: stream::Channels,
@@ -80,17 +90,14 @@ fn main() {
         "probe" => probe(&cfg.rtsp),
         "reset" =>println!("removed {} pairing(s); restart the service", hap::reset(cfg.state_dir)),
         "serve" => {
-            let protect = match (&cfg.protect_token, &cfg.protect_camera_id) {
-                (Some(key), Some(cam)) => {
-                    let host = cfg.protect_host.clone().or_else(|| rtsp_host(&cfg.rtsp)).unwrap_or_else(|| die("protect_host?".into()));
-                    Some(Arc::new(protect::Protect::new(&host, key, cam, cfg.protect_cert_sha256.as_deref()).unwrap_or_else(|e| die(e))))
-                }
-                _ => {
-                    log("no protect_token / protect_camera_id: two-way audio off".into());
-                    None
-                }
-            };
-            let cam = Arc::new(camera::Camera::new(&cfg.name, cfg.doorbell, cfg.rtsp.clone(), protect));
+            let protect = cfg.protect.as_ref().map(|p| {
+                let host = p.host.clone().or_else(|| rtsp_host(&cfg.rtsp)).unwrap_or_else(|| die("[protect] host?".into()));
+                Arc::new(protect::Protect::new(&host, &p.token, &p.camera_id, p.cert_sha256.as_deref()).unwrap_or_else(|e| die(e)))
+            });
+            if protect.is_none() {
+                log("no [protect]: two-way audio off".into());
+            }
+            let cam = Arc::new(camera::Camera::new(&cfg.name, cfg.doorbell, cfg.rtsp.clone(), protect).with_info(cfg.manufacturer.clone(), cfg.model.clone()));
             let server = hap::Server::start(cam, cfg.hap_port, cfg.state_dir).unwrap_or_else(|e| die(e));
             if let Some(listen) = &cfg.ring_listen {
                 if cfg.ring_token.is_empty() {

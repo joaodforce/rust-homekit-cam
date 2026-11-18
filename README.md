@@ -1,11 +1,22 @@
 # rust-homekit-cam
 
-A small Rust service that puts a UniFi Protect **doorbell** (and later, regular cameras) in Apple
-Home as a native HomeKit accessory: ring notifications, live video and audio, two-way audio —
-**without video transcoding**. One static binary, no Node, no ffmpeg for the video path.
+A small Rust service that puts an RTSP **doorbell or camera** in Apple Home as a native HomeKit
+accessory: ring notifications, live video and audio, two-way audio — **without video
+transcoding**. One static binary (~2 MB), no Node, no ffmpeg.
+
+It is not tied to one vendor. The core works with any camera that serves **H.264 over RTSP**;
+vendor-specific extras (UniFi Protect today) are optional backends:
+
+| Feature | Any H.264 RTSP camera | UniFi Protect |
+|---|---|---|
+| Live video | ✓ (one URL, or up to three by bitrate) | ✓ (High / Medium / Low channels) |
+| Camera audio | ✓ if the camera streams Opus | ✓ (Protect adds an Opus track) |
+| Two-way audio | not yet (RTSP back-channel / ONVIF planned) | ✓ (talk-back session) |
+| Doorbell ring | ✓ `POST /ring` from anything (HA, Node-RED, a webhook) | ✓ same |
+| RTSP login | Basic / Digest from `rtsp://user:pass@…` | not needed (alias URLs) |
 
 Status: early. Pairing, the doorbell ring, live video and camera audio work (tested with a
-Doorbell Lite and an iPhone). Two-way audio is next.
+UniFi Protect Doorbell Lite and an iPhone). Two-way audio is written, test pending.
 
 ## What it exposes
 
@@ -19,7 +30,8 @@ One HAP accessory per camera; a doorbell is category 18 (Video Doorbell), a came
 | Microphone (0x112) | camera audio (mute) |
 | Speaker (0x113) | two-way audio (mute, volume) |
 
-Later: Motion Sensor (Protect motion / smart detections), snapshots, and **HomeKit Secure Video**
+Later: Motion Sensor (from the same pluggable event sources as the ring), snapshots, and
+**HomeKit Secure Video**
 (Camera Operating Mode, Camera Event Recording Management, Data Stream: fMP4 fragments of the same
 H.264, still no transcoding).
 
@@ -28,9 +40,9 @@ H.264, still no transcoding).
 ```
 iPhone / Home hub ──HAP (HTTP, ChaCha20-Poly1305)──► rust-homekit-cam ◄── POST /ring (HA, webhook…)
         ▲   │                                              │   ▲
-        │   └── SRTP talk-back audio ───────────────────►  │   └── RTSP/TCP: Protect channel
-        └──────────── SRTP: H.264 + Opus ◄─────────────────┘        High / Medium / Low
-                                                           └──► Protect talk-back (camera speaker)
+        │   └── SRTP talk-back audio ───────────────────►  │   └── RTSP/TCP from the camera / NVR
+        └──────────── SRTP: H.264 + Opus ◄─────────────────┘        (up to 3 URLs by bitrate)
+                                                           └──► talk-back backend (Protect today)
 ```
 
 - **HAP**: own code (hap-rs is unmaintained and has no camera support), from the author's crtd
@@ -41,12 +53,14 @@ iPhone / Home hub ──HAP (HTTP, ChaCha20-Poly1305)──► rust-homekit-cam 
   ports, SRTP keys); we answer with our address/ports, our SRTP keys and SSRCs. Then
   `SelectedRTPStreamConfiguration` starts / reconfigures / stops the stream with the size,
   max bitrate, payload type and MTU it wants.
-- **Video, no transcoding**: Protect serves H.264 over RTSP. Per stream we pull the RTP H.264
+- **Video, no transcoding**: the camera (or NVR) serves H.264 over RTSP. H.265 is not
+  supported: iPhones only take H.264 here, and that would need a transcode. Per stream we pull the RTP H.264
   packets, rewrite PT/SSRC/seq/timestamp, re-fragment NALs to the controller's MTU (FU-A; 1378
   on IPv4), put SPS/PPS in front of each IDR, and send them SRTP-protected
   (AES_CM_128_HMAC_SHA1_80). RTCP sender reports keep the stream alive.
-- **Channel choice**: we pick the Protect channel whose bitrate fits the request, e.g. for a
-  Doorbell Lite:
+- **Channel choice**: up to three RTSP URLs (`high`, `medium`, `low`: a camera's main and sub
+  streams, or Protect's channels); we pick the one whose bitrate fits the request. One URL is
+  fine too. E.g. a Protect Doorbell Lite:
 
   | Channel | Size | Bitrate | Used when the request is |
   |---|---|---|---|
@@ -56,17 +70,19 @@ iPhone / Home hub ──HAP (HTTP, ChaCha20-Poly1305)──► rust-homekit-cam 
 
   The advertised sizes are only what the iPhone may ask for; it decodes the real size from the
   SPS (as Scrypted's "copy" mode does).
-- **Audio**: Protect's RTSP carries an **Opus** track next to AAC, and HomeKit accepts Opus, so
-  camera audio is passed through (only the RTP header is rewritten). Only Opus is offered:
+- **Audio**: HomeKit accepts Opus, so a camera's **Opus** track is passed through (only the RTP
+  header is rewritten); Protect adds one next to AAC. Cameras with AAC/G.711 only get video
+  without audio for now (an optional audio-only transcode could be added). Only Opus is offered:
   with AAC-ELD listed the iPhone picks AAC-ELD. iOS keeps the audio configuration it saw when
   the accessory was added, so after changing the offer the accessory has to be removed and
   added again.
-- **Two-way audio**: the iPhone sends its microphone as SRTP (Opus) to our audio port; we forward
-  it to the camera's speaker through a Protect talk-back session (Opus where the camera supports
-  it, otherwise an audio-only transcode).
+- **Two-way audio**: the iPhone sends its microphone as SRTP (Opus) to our audio port; a
+  talk-back backend gets it to the camera's speaker. Protect: the integration API opens a
+  talk-back session (Opus over RTP straight to the camera, UDP 7004) and we forward the packets
+  as they are. Other cameras: RTSP back-channel (ONVIF Profile T) is the likely next backend.
 - **Ring**: pluggable sources that all end in `Ringer::ring()`. Today: `POST /ring` with a bearer
-  token (from Home Assistant or a Protect alarm-manager webhook). Later possibly Protect's own
-  event websocket.
+  token, from anything (Home Assistant, Node-RED, a Protect alarm-manager webhook…). Later
+  possibly vendor event feeds (Protect websocket, ONVIF events).
 
 ## Run
 
@@ -83,7 +99,7 @@ If adding hangs at "Adding to Home…", the iPhone may now hide that accessory i
 service, move `state_dir` away (new id and code) and add it again.
 Test a ring: `curl -X POST -H "Authorization: Bearer <token>" http://<host>:8780/ring`.
 
-The config holds secrets (RTSP alias, ring token): never commit it. State (setup code, pairings,
+The config holds secrets (RTSP credentials or alias, API key, ring token): never commit it. State (setup code, pairings,
 Ed25519 key) lives in `state_dir`, mode 0600.
 
 Deploy: one static binary plus a systemd unit, on a host in the same L2 network as the home hubs
@@ -99,7 +115,8 @@ the camera, it does not relay.
 3. Camera audio (Opus passthrough).
 4. Two-way audio (Protect talk-back).
 5. Deploy as a service.
-6. Optional: motion sensor, snapshots, more cameras, HomeKit Secure Video.
+6. Later: several cameras per process, RTSP back-channel talk-back, motion sensor, snapshots,
+   HomeKit Secure Video, optional audio transcode for AAC-only cameras.
 
 ## License
 

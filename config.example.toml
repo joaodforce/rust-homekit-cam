@@ -1,25 +1,33 @@
-# Copy to /etc/rust-homekit-cam.toml (mode 0600). Never commit the real one: the RTSP alias
-# and the ring token are secrets.
+# Copy to /etc/rust-homekit-cam.toml (mode 0600). Never commit the real one: RTSP credentials,
+# API keys and the ring token are secrets.
 name = "Doorbell"
-doorbell = true
+doorbell = true                  # false: a plain camera
+# manufacturer = "Acme"          # shown in the Home app's accessory details
+# model = "Doorbell 2000"
 hap_port = 51830
 state_dir = "/var/lib/rust-homekit-cam"
 
-# Rings arrive as POST /ring with "Authorization: Bearer <ring_token>".
+# Rings arrive as POST /ring with "Authorization: Bearer <ring_token>" (from HA, a webhook…).
 ring_listen = "0.0.0.0:8780"
 ring_token = "change-me"
 
-# Two-way audio: a Protect API key (UniFi OS → Settings → Control Plane → Integrations),
-# the camera's id, and the console's certificate fingerprint (logged on first use if unset).
-# The service host must be able to reach the camera on UDP 7004 (camera VLAN firewall!).
-protect_token = "…"
-protect_camera_id = "…"
-# protect_host = "192.0.2.1"   # default: the RTSP host
-# protect_cert_sha256 = "AB:CD:…"
-
-# Protect: Settings → camera → Advanced → RTSP. Plain RTSP (port 7447) on the LAN.
+# The camera's H.264 RTSP streams: one URL is enough; with several, the one that fits the
+# bitrate the iPhone asks for is used. Credentials go in the URL (Basic or Digest).
 [rtsp]
-high = "rtsp://192.0.2.1:7447/xxxxxxxxxxxxxxxx"
-medium = "rtsp://192.0.2.1:7447/yyyyyyyyyyyyyyyy"
-low = "rtsp://192.0.2.1:7447/zzzzzzzzzzzzzzzz"
-# allow_high = true   # use High (10 Mbps) when the iPhone asks for ≥ 4 Mbps
+high = "rtsp://user:password@192.0.2.10:554/stream1"     # main stream
+low = "rtsp://user:password@192.0.2.10:554/stream2"      # sub stream
+# medium = "…"
+# allow_high = true   # use high only when the iPhone asks for ≥ 4 Mbps (default: medium first)
+
+# ---- UniFi Protect (optional) -------------------------------------------------------------
+# RTSP: Protect → camera → Settings → Advanced → RTSP; plain rtsp://<console>:7447/<alias>,
+# no credentials (the alias is the secret); high/medium/low = the camera's three channels.
+#
+# Two-way audio: an API key (UniFi OS → Settings → Control Plane → Integrations), the camera's
+# id, and the console's certificate fingerprint (logged on first use if unset). The service
+# host must reach the camera on UDP 7004 (mind camera-VLAN firewall rules).
+# [protect]
+# token = "…"
+# camera_id = "…"
+# host = "192.0.2.1"            # default: the RTSP host
+# cert_sha256 = "AB:CD:…"

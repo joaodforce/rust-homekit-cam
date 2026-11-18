@@ -1,5 +1,6 @@
-//! Minimal RTSP client for Protect: DESCRIBE, SETUP (TCP interleaved), PLAY, then RTP packets.
-//! Plain `rtsp://` (Protect's port 7447) on the LAN; the URL's alias is the credential.
+//! Minimal RTSP client: DESCRIBE, SETUP (TCP interleaved), PLAY, then RTP packets.
+//! Plain `rtsp://` on the LAN. Credentials in the URL (`rtsp://user:pass@host/…`) are used for
+//! Basic or Digest auth (most cameras); Protect's URLs carry their own alias instead.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
@@ -22,6 +23,65 @@ pub struct Client {
     cseq: u32,
     session: Option<String>,
     last_keepalive: Instant,
+    /// (user, password) from the URL
+    creds: Option<(String, String)>,
+    /// the server's WWW-Authenticate challenge, once seen
+    challenge: Option<String>,
+}
+
+/// Split `rtsp://user:pass@host:port/path` into the URL without credentials and the credentials.
+fn split_creds(url: &str) -> (String, Option<(String, String)>) {
+    let Some(rest) = url.strip_prefix("rtsp://") else { return (url.to_string(), None) };
+    let (auth, tail) = rest.split_at(rest.find('/').unwrap_or(rest.len()));
+    match auth.rsplit_once('@') {
+        Some((userinfo, host)) => {
+            let (u, p) = userinfo.split_once(':').unwrap_or((userinfo, ""));
+            let dec = |s: &str| percent_decode(s);
+            (format!("rtsp://{host}{tail}"), Some((dec(u), dec(p))))
+        }
+        None => (url.to_string(), None),
+    }
+}
+
+fn percent_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' && i + 2 < b.len() {
+            if let Ok(v) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
+                out.push(v);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn md5_hex(s: &str) -> String {
+    use md5::{Digest, Md5};
+    Md5::digest(s.as_bytes()).iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// The Authorization header for a challenge (Digest, RFC 2617 without qop, as cameras use;
+/// or Basic).
+fn authorization(challenge: &str, user: &str, pass: &str, method: &str, uri: &str) -> String {
+    let param = |name: &str| {
+        let key = format!("{name}=\"");
+        challenge.find(&key).map(|i| &challenge[i + key.len()..]).and_then(|r| r.split('"').next()).unwrap_or("").to_string()
+    };
+    if challenge.trim_start().to_ascii_lowercase().starts_with("digest") {
+        let (realm, nonce) = (param("realm"), param("nonce"));
+        let ha1 = md5_hex(&format!("{user}:{realm}:{pass}"));
+        let ha2 = md5_hex(&format!("{method}:{uri}"));
+        let response = md5_hex(&format!("{ha1}:{nonce}:{ha2}"));
+        format!("Authorization: Digest username=\"{user}\", realm=\"{realm}\", nonce=\"{nonce}\", uri=\"{uri}\", response=\"{response}\"")
+    } else {
+        format!("Authorization: Basic {}", crate::tlv::b64(format!("{user}:{pass}").as_bytes()))
+    }
 }
 
 /// One interleaved packet: channel (even = RTP, odd = RTCP) and bytes.
@@ -29,13 +89,15 @@ pub type Packet = (u8, Vec<u8>);
 
 impl Client {
     pub fn connect(url: &str) -> Result<(Client, Vec<Track>), String> {
+        let (url, creds) = split_creds(url);
+        let url = url.as_str();
         let hostport = url.strip_prefix("rtsp://").ok_or("not an rtsp:// URL")?.split('/').next().unwrap_or("");
         let addr = if hostport.contains(':') { hostport.to_string() } else { format!("{hostport}:554") };
         let s = TcpStream::connect(&addr).map_err(|e| format!("rtsp connect: {e}"))?;
         s.set_read_timeout(Some(Duration::from_secs(10))).ok();
         s.set_nodelay(true).ok();
         let r = BufReader::new(s.try_clone().map_err(|e| e.to_string())?);
-        let mut c = Client { w: s, r, url: url.to_string(), cseq: 0, session: None, last_keepalive: Instant::now() };
+        let mut c = Client { w: s, r, url: url.to_string(), cseq: 0, session: None, last_keepalive: Instant::now(), creds, challenge: None };
         let (headers, body) = c.request("DESCRIBE", url, &["Accept: application/sdp"])?;
         let base = header(&headers, "content-base").unwrap_or(url).trim_end_matches('/').to_string();
         let tracks = parse_sdp(&String::from_utf8_lossy(&body), &base);
@@ -67,6 +129,10 @@ impl Client {
     fn send(&mut self, method: &str, url: &str, extra: &[&str]) -> Result<(), String> {
         self.cseq += 1;
         let mut msg = format!("{method} {url} RTSP/1.0\r\nCSeq: {}\r\nUser-Agent: rust-homekit-cam\r\n", self.cseq);
+        if let (Some(ch), Some((u, p))) = (&self.challenge, &self.creds) {
+            msg.push_str(&authorization(ch, u, p, method, url));
+            msg.push_str("\r\n");
+        }
         for h in extra {
             msg.push_str(h);
             msg.push_str("\r\n");
@@ -76,10 +142,20 @@ impl Client {
     }
 
     fn request(&mut self, method: &str, url: &str, extra: &[&str]) -> Result<(Vec<(String, String)>, Vec<u8>), String> {
+        let mut retried = false;
         self.send(method, url, extra)?;
         loop {
             match self.read_message()? {
-                Message::Response(code, h, b) if code == 200 => return Ok((h, b)),
+                Message::Response(200, h, b) => return Ok((h, b)),
+                Message::Response(401, h, _) if !retried && self.creds.is_some() => {
+                    // prefer Digest when several challenges are offered
+                    let chs: Vec<&str> = h.iter().filter(|(k, _)| k == "www-authenticate").map(|(_, v)| v.as_str()).collect();
+                    let ch = chs.iter().find(|c| c.to_ascii_lowercase().starts_with("digest")).or(chs.first()).ok_or("rtsp: 401 without a challenge")?;
+                    self.challenge = Some(ch.to_string());
+                    retried = true;
+                    self.send(method, url, extra)?;
+                }
+                Message::Response(401, _, _) => return Err(format!("rtsp {method}: 401 (wrong or missing user:password in the URL)")),
                 Message::Response(code, _, _) => return Err(format!("rtsp {method}: status {code}")),
                 Message::Data(_) => {}
             }
@@ -176,6 +252,19 @@ fn parse_sdp(sdp: &str, base: &str) -> Vec<Track> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn credentials_and_digest() {
+        let (u, c) = split_creds("rtsp://admin:p%40ss@192.0.2.5:554/cam/realmonitor?channel=1&subtype=0");
+        assert_eq!(u, "rtsp://192.0.2.5:554/cam/realmonitor?channel=1&subtype=0");
+        assert_eq!(c, Some(("admin".into(), "p@ss".into())));
+        assert_eq!(split_creds("rtsp://h:7447/abc").1, None);
+        // RFC 2617 section 3.5 example (no qop)
+        let ch = r#"Digest realm="testrealm@host.com", nonce="dcd98b7102dd2f0e8b11d0f600bfb0c093""#;
+        let a = authorization(ch, "Mufasa", "Circle Of Life", "GET", "/dir/index.html");
+        assert!(a.contains(r#"response="670fd8c2df070c60b045671b8b24ff02""#), "{a}");
+        assert_eq!(authorization("Basic realm=\"x\"", "a", "b", "DESCRIBE", "/"), "Authorization: Basic YTpi");
+    }
 
     #[test]
     fn sdp_tracks() {
