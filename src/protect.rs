@@ -95,7 +95,24 @@ impl Protect {
         Ok(Protect { host: host.to_string(), key: key.to_string(), camera: camera.to_string(), tls: Arc::new(tls), seen })
     }
 
+    /// One API request; on HTTP 429 (the console's rate limit, hit when several cameras or the
+    /// setup helper ask at once) waits as told by Retry-After (else 1 s, 2 s) and retries.
     fn request(&self, method: &str, path: &str, body: &str, accept: &str) -> Result<Vec<u8>, String> {
+        for attempt in 0.. {
+            let r = self.request_once(method, path, body, accept)?;
+            match r.status {
+                200 => return Ok(r.body),
+                429 if attempt < 3 => {
+                    let wait = r.header("retry-after").and_then(|v| v.trim().parse::<u64>().ok()).unwrap_or(1 << attempt).min(10);
+                    std::thread::sleep(Duration::from_secs(wait));
+                }
+                s => return Err(format!("protect {method} {path}: HTTP {s}")),
+            }
+        }
+        unreachable!()
+    }
+
+    fn request_once(&self, method: &str, path: &str, body: &str, accept: &str) -> Result<crate::httpc::Resp, String> {
         let addr = if self.host.contains(':') { self.host.clone() } else { format!("{}:443", self.host) };
         let tcp = TcpStream::connect(&addr).map_err(|e| format!("protect {addr}: {e}"))?;
         tcp.set_read_timeout(Some(Duration::from_secs(10))).ok();
@@ -116,11 +133,7 @@ impl Protect {
         if let Some(fp) = self.seen.lock().unwrap().take() {
             crate::log(format!("protect: certificate not pinned; to pin it set [protect] cert_sha256 = \"{fp}\""));
         }
-        let r = crate::httpc::parse(&raw).map_err(|e| format!("protect: {e}"))?;
-        if r.status != 200 {
-            return Err(format!("protect {method} {path}: HTTP {}", r.status));
-        }
-        Ok(r.body)
+        crate::httpc::parse(&raw).map_err(|e| format!("protect: {e}"))
     }
 
     fn request_json(&self, method: &str, path: &str, body: &str) -> Result<Value, String> {

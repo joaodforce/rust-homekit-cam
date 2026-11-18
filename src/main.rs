@@ -380,7 +380,8 @@ fn protect_cameras(cfg: &Config) {
         println!("[rtsp]");
         match api.rtsp_urls(&id) {
             Ok(urls) if !urls.is_empty() => urls.iter().for_each(|(ch, u)| println!("{ch} = \"{u}\"")),
-            _ => println!("# RTSP is off for this camera: Protect → camera → Settings → Advanced → RTSP"),
+            Ok(_) => println!("# RTSP is off for this camera: Protect → camera → Settings → Advanced → RTSP"),
+            Err(e) => println!("# couldn't read the RTSP streams: {e}"),
         }
         println!("[protect]\ntoken = \"…\"\ncamera_id = \"{id}\"\nhost = \"{host}\"\n");
     }
