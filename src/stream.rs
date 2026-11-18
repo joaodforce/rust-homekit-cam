@@ -64,6 +64,11 @@ struct Rewriter {
     pub last_ts: u32,
     /// Opus only: repack single-frame packets to this packet time (ms), 0 = as they come
     ptime: u32,
+    /// Opus only: HomeKit's RTP clock (the requested sample rate: HAP wants RFC 3550 timestamps,
+    /// not RFC 7587's 48 kHz), 0 = keep the incoming clock
+    rate: u32,
+    /// incoming timestamp position, unwrapped: (last incoming ts, total ticks at 48 kHz)
+    clock: Option<(u32, u64)>,
     /// frames waiting to be packed: (TOC config|stereo bits, timestamp of the first, frames)
     pending: Option<(u8, u32, Vec<Vec<u8>>)>,
 }
@@ -104,11 +109,23 @@ fn opus_pack(toc: u8, frames: &[Vec<u8>]) -> Vec<u8> {
 
 impl Rewriter {
     fn new(pt: u8, ssrc: u32) -> Self {
-        Rewriter { pt, ssrc, seq: OsRng.next_u32() as u16, ts_offset: OsRng.next_u32(), last_ts: 0, ptime: 0, pending: None }
+        Rewriter { pt, ssrc, seq: OsRng.next_u32() as u16, ts_offset: OsRng.next_u32(), last_ts: 0, ptime: 0, rate: 0, clock: None, pending: None }
     }
 
-    fn opus(pt: u8, ssrc: u32, ptime: u32) -> Self {
-        Rewriter { ptime, ..Self::new(pt, ssrc) }
+    /// `rate`: the controller's requested sample rate (Hz), the clock of our timestamps.
+    fn opus(pt: u8, ssrc: u32, ptime: u32, rate: u32) -> Self {
+        Rewriter { ptime, rate, ..Self::new(pt, ssrc) }
+    }
+
+    /// Incoming 48 kHz Opus timestamp → our clock (`rate`), keeping the camera's real timing.
+    fn rescale(&mut self, ts: u32) -> u32 {
+        if self.rate == 0 {
+            return ts;
+        }
+        let (last, ticks) = self.clock.get_or_insert((ts, 0));
+        *ticks = ticks.wrapping_add_signed(ts.wrapping_sub(*last) as i32 as i64);
+        *last = ts;
+        (*ticks * self.rate as u64 / 48_000) as u32
     }
 
     fn packet(&mut self, ts: u32, marker: bool, payload: &[u8]) -> Vec<u8> {
@@ -139,7 +156,7 @@ impl Rewriter {
             return;
         }
         let Ok(ts) = pkt[4..8].try_into().map(u32::from_be_bytes) else { return };
-        let ts = ts.wrapping_add(self.ts_offset);
+        let ts = self.rescale(ts).wrapping_add(self.ts_offset);
         let payload = &pkt[off..end];
         let marker = pkt[1] & 0x80 != 0;
         let toc = payload[0];
@@ -219,9 +236,9 @@ pub fn start(ep: Endpoint, req: Request, channels: &Channels, protect: Option<Ar
     });
 
     // two-way audio: a Protect talk-back session, then the controller's Opus RTP straight to it
-    if let (Some(_), Some(p)) = (&req.audio, protect) {
-        let (sock, key, stop3) = (ep.audio_sock.clone(), ep.audio_srtp_in.clone(), stop.clone());
-        std::thread::spawn(move || talkback(sock, key, &p, stop3));
+    if let (Some(a), Some(p)) = (&req.audio, protect) {
+        let (sock, key, stop3, clock) = (ep.audio_sock.clone(), ep.audio_srtp_in.clone(), stop.clone(), a.rate.max(8000));
+        std::thread::spawn(move || talkback(sock, key, &p, stop3, clock));
     }
 
     std::thread::spawn(move || {
@@ -341,10 +358,11 @@ fn run(ep: &Endpoint, req: &Request, url: &str, stop: &AtomicBool, conn: &Mutex<
     }
     client.play()?;
     let audio_dest = SocketAddr::new(ep.controller, ep.audio_port);
-    let mut audio = opus.and(req.audio.as_ref()).map(|a| (Rewriter::opus(a.pt, ep.audio_ssrc, a.ptime), srtp::Sender::new(&ep.audio_srtp_out)));
+    let mut audio = opus.and(req.audio.as_ref()).map(|a| (Rewriter::opus(a.pt, ep.audio_ssrc, a.ptime, a.rate), srtp::Sender::new(&ep.audio_srtp_out)));
     let mut a_out = Vec::new();
     let (mut a_count, mut a_octets, mut a_logged) = (0u32, 0u32, false);
     let (mut vj, mut aj) = (Jitter::default(), Jitter::default());
+    let audio_clock = req.audio.as_ref().map(|a| a.rate).filter(|r| *r > 0).unwrap_or(48_000);
 
     let dest = SocketAddr::new(ep.controller, ep.video_port);
     let mut srtp = srtp::Sender::new(&ep.video_srtp_out);
@@ -369,7 +387,7 @@ fn run(ep: &Endpoint, req: &Request, url: &str, stop: &AtomicBool, conn: &Mutex<
                     }
                     a_count = a_count.wrapping_add(1);
                     a_octets = a_octets.wrapping_add((p.len() - 12) as u32);
-                    aj.push(&p, 48_000);
+                    aj.push(&p, audio_clock);
                     let _ = ep.audio_sock.send_to(&sr.protect_rtp(&p), audio_dest);
                 }
             }
@@ -415,7 +433,8 @@ fn run(ep: &Endpoint, req: &Request, url: &str, stop: &AtomicBool, conn: &Mutex<
 
 /// The controller's microphone → camera speaker, until the stream stops. No transcoding: the
 /// camera takes Opus over RTP; we decrypt, give the packets our own header and forward them.
-fn talkback(sock: Arc<std::net::UdpSocket>, key: Vec<u8>, protect: &Protect, stop: Arc<AtomicBool>) {
+/// `clock`: our audio RTP clock (the requested sample rate), for the RTCP report stats.
+fn talkback(sock: Arc<std::net::UdpSocket>, key: Vec<u8>, protect: &Protect, stop: Arc<AtomicBool>, clock: u32) {
     let tb = match protect.talkback() {
         Ok(t) if t.codec == "opus" => t,
         Ok(t) => return crate::log(format!("talkback: camera wants {} (only Opus is supported)", t.codec)),
@@ -425,7 +444,7 @@ fn talkback(sock: Arc<std::net::UdpSocket>, key: Vec<u8>, protect: &Protect, sto
     let Ok(out) = std::net::UdpSocket::bind(("0.0.0.0", 0)) else { return };
     let _ = sock.set_read_timeout(Some(Duration::from_secs(1)));
     let mut srtp = srtp::Receiver::new(&key);
-    let mut stats = RtcpStats::new("audio", &key, 48_000);
+    let mut stats = RtcpStats::new("audio", &key, clock);
     let mut rw = Rewriter::new(96, OsRng.next_u32());
     let (mut buf, mut got, mut bad) = ([0u8; 2048], 0u64, 0u64);
     while !stop.load(Ordering::Relaxed) {
@@ -493,7 +512,7 @@ mod tests {
     fn opus_frames_packed_to_60_ms() {
         // config 23 = CELT fullband 20 ms, mono, code 0 (TOC 0xb8), as Protect sends
         assert_eq!(opus_frame_tenths(0xb8), 200);
-        let mut rw = Rewriter::opus(110, 1, 60);
+        let mut rw = Rewriter::opus(110, 1, 60, 0);
         let mut out = Vec::new();
         let frame = |ts: u32, n: usize| {
             let mut p = vec![0x80, 96, 0, 0];
@@ -514,10 +533,36 @@ mod tests {
         // timestamp of the first frame
         assert_eq!(u32::from_be_bytes(out[0][4..8].try_into().unwrap()), rw.ts_offset);
         // at 20 ms: passed through as is
-        let mut rw20 = Rewriter::opus(110, 1, 20);
+        let mut rw20 = Rewriter::opus(110, 1, 20, 0);
         let mut o = Vec::new();
         rw20.rewrite(&frame(0, 10), &mut o);
         assert_eq!(o.len(), 1);
         assert_eq!(o[0][12], 0xb8);
+    }
+
+    #[test]
+    fn opus_timestamps_at_the_requested_rate() {
+        // HomeKit asked for 16 kHz: 20 ms = 320 ticks (not 960), gaps kept, 32-bit wrap handled
+        let ts_of = |p: &Vec<u8>| u32::from_be_bytes(p[4..8].try_into().unwrap());
+        let pkt = |ts: u32| {
+            let mut p = vec![0x80, 96, 0, 0];
+            p.extend_from_slice(&ts.to_be_bytes());
+            p.extend_from_slice(&[0, 0, 0, 9, 0xb8, 1, 2, 3]);
+            p
+        };
+        let mut rw = Rewriter::opus(110, 1, 20, 16_000);
+        let mut o = Vec::new();
+        for ts in [u32::MAX - 959, 0, 960, 960 + 1920] {
+            rw.rewrite(&pkt(ts), &mut o);
+        }
+        let t: Vec<u32> = o.iter().map(|p| ts_of(p).wrapping_sub(rw.ts_offset)).collect();
+        assert_eq!(t, [0, 320, 640, 1280]);
+        // 60 ms packets: one per three frames, 960 apart
+        let mut rw = Rewriter::opus(110, 1, 60, 16_000);
+        let mut o = Vec::new();
+        for i in 0..6u32 {
+            rw.rewrite(&pkt(5000 + i * 960), &mut o);
+        }
+        assert_eq!(o.iter().map(|p| ts_of(p).wrapping_sub(rw.ts_offset)).collect::<Vec<_>>(), [0, 960]);
     }
 }
