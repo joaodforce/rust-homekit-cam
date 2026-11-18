@@ -154,8 +154,14 @@ fn main() {
             let (code, paired) = hap::code(cfg.state_dir.clone().unwrap());
             println!("{code} ({})", if paired { "paired" } else { "not paired" });
         }
-        "probe" => probe(&cfg.rtsp),
+        "probe" => {
+            if let Some(oc) = &cfg.onvif {
+                connect_onvif(oc, &mut cfg.rtsp);
+            }
+            probe(&cfg.rtsp)
+        }
         "onvif-info" => onvif_info(&cfg),
+        "snapshot" => snapshot_test(&cfg, args.get(3).map(String::as_str).unwrap_or("snapshot.jpg")),
         "protect-cameras" => protect_cameras(&cfg),
         "record-test" => record_test(&cfg.rtsp, args.get(3).map(String::as_str).unwrap_or("record-test.mp4")),
         "reset" =>println!("removed {} pairing(s); restart the service", hap::reset(cfg.state_dir.clone().unwrap())),
@@ -287,6 +293,27 @@ fn connect_onvif(oc: &OnvifCfg, rtsp: &mut stream::Channels) -> (Arc<onvif::Onvi
         None
     };
     (Arc::new(o), snapshot)
+}
+
+/// `snapshot <config> <out.jpg>`: fetch the picture the Home app would get.
+fn snapshot_test(cfg: &Config, out: &str) {
+    let source = if let Some(u) = &cfg.snapshot_url {
+        snapshot::Source::Url(u.clone())
+    } else if let Some(p) = &cfg.protect {
+        let host = p.host.clone().or_else(|| rtsp_host(&cfg.rtsp)).unwrap_or_else(|| die("[protect] host?".into()));
+        snapshot::Source::Protect(Arc::new(protect::Protect::new(&host, &p.token, &p.camera_id, p.cert_sha256.as_deref()).unwrap_or_else(|e| die(e))))
+    } else if let Some(oc) = &cfg.onvif {
+        let mut ch = cfg.rtsp.clone();
+        match connect_onvif(oc, &mut ch).1 {
+            Some(u) => snapshot::Source::Url(u),
+            None => die("the camera has no ONVIF snapshot URI: set snapshot_url".into()),
+        }
+    } else {
+        die("no snapshot source: set snapshot_url".into())
+    };
+    let img = snapshot::Snapshots::new(source).get().unwrap_or_else(|e| die(e));
+    std::fs::write(out, img.as_slice()).unwrap_or_else(|e| die(e.to_string()));
+    println!("{out}: {} bytes", img.len());
 }
 
 /// `onvif-info <config>`: what the [onvif] camera offers, and its events for 30 s.
