@@ -16,7 +16,7 @@ extras through optional backends:
 | Doorbell ring | ✓ `POST /ring` | ✓ + event topics | ✓ from Protect |
 | Motion sensor | ✓ `POST /motion` | ✓ camera's motion events | ✓ smart detections |
 | HomeKit Secure Video | ✓ | ✓ | ✓ |
-| Snapshots | ✓ JPEG URL | ✓ ONVIF or JPEG URL | ✓ Protect API |
+| Snapshots | ✓ JPEG URL, or ffmpeg (optional) | ✓ ONVIF or JPEG URL | ✓ Protect API |
 
 Any camera can be a doorbell (`doorbell = true`). Tested with a UniFi Protect Doorbell Lite and
 an Intelbras (Dahua) ONVIF camera, iPhones and home hubs, in a 256 MB Debian LXC.

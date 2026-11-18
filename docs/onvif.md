@@ -33,7 +33,7 @@ it sends.
 | | From ONVIF | Override |
 |---|---|---|
 | Streams | the H.264 profiles: the largest becomes `high` (and `medium`), the smallest `low`; the login is added to the URLs | set `[rtsp]` yourself |
-| Snapshots | the profile's snapshot URI (Media, then Media2) | `snapshot_url` (top level), or `snapshot = false` |
+| Snapshots | the profile's snapshot URI (Media, then Media2) | `snapshot_url` or `snapshot_ffmpeg` (top level), or `snapshot = false` |
 | Motion | events whose topic contains one of `motion_topics` (default `["Motion"]`): `VideoSource/MotionAlarm`, `RuleEngine/CellMotionDetector/Motion`… true turns the Motion Sensor on, false off | `motion_topics = [...]`, `motion = false` (top level) |
 | Ring | events whose topic contains one of `ring_topics` with a true value (none by default; e.g. a doorbell's `Device/Trigger/DigitalInput`) | `ring_topics = [...]` |
 

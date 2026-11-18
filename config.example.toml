@@ -20,6 +20,8 @@ ring_token = "change-me"
 # Snapshots for the Home app: the camera's JPEG URL (plain http, Basic/Digest from the URL).
 # With [protect] and no snapshot_url, Protect's snapshot API is used.
 # snapshot_url = "http://user:password@192.0.2.10/cgi-bin/snapshot.cgi"
+# No snapshot URL at all? Grab a frame from the stream with ffmpeg (you install it):
+# snapshot_ffmpeg = "ffmpeg"     # or "/usr/bin/ffmpeg"
 
 # The camera's H.264 RTSP streams: one URL is enough; with several, the one that fits the
 # bitrate the iPhone asks for is used. Credentials go in the URL (Basic or Digest).

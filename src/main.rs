@@ -95,6 +95,9 @@ struct Config {
     ring_token: String,
     /// A JPEG snapshot URL (http://[user:pass@]host/path); default with [protect]: Protect's.
     snapshot_url: Option<String>,
+    /// Grab snapshots from the RTSP stream (sub stream first) with this ffmpeg ("ffmpeg" =
+    /// from PATH). Used when there is no snapshot_url; wins over the [protect]/[onvif] snapshots.
+    snapshot_ffmpeg: Option<String>,
     /// Optional ONVIF backend
     onvif: Option<OnvifCfg>,
     /// Optional UniFi Protect backend (two-way audio, snapshots).
@@ -182,13 +185,14 @@ fn main() {
             let onvif_snapshot = onvif.as_ref().and_then(|(_, snap)| snap.clone());
             let snapshots = match (&cfg.snapshot_url, &protect, onvif_snapshot) {
                 (Some(u), _, _) => Some(snapshot::Source::Url(u.clone())),
+                (None, _, _) if cfg.snapshot_ffmpeg.is_some() => Some(ffmpeg_source(cfg.snapshot_ffmpeg.as_deref(), &cfg.rtsp)),
                 (None, Some(p), _) => Some(snapshot::Source::Protect(p.clone())),
                 (None, None, Some(u)) => Some(snapshot::Source::Url(u)),
                 _ => None,
             }
             .map(|s| Arc::new(snapshot::Snapshots::new(s)));
             if snapshots.is_none() {
-                log("no snapshot_url or [protect]: no snapshots (blank tiles)".into());
+                log("no snapshot source (snapshot_url, snapshot_ffmpeg, [protect] or [onvif]): blank tiles".into());
             }
             let motion_state = cfg.motion.unwrap_or(protect.is_some() || onvif.is_some()).then(|| Arc::new(std::sync::atomic::AtomicBool::new(false)));
             let hksv = (cfg.hksv.unwrap_or(motion_state.is_some()) && motion_state.is_some())
@@ -295,10 +299,23 @@ fn connect_onvif(oc: &OnvifCfg, rtsp: &mut stream::Channels) -> (Arc<onvif::Onvi
     (Arc::new(o), snapshot)
 }
 
+/// Stream snapshots through ffmpeg: the smallest stream decodes fastest.
+fn ffmpeg_source(bin: Option<&str>, r: &stream::Channels) -> snapshot::Source {
+    let bin = bin.unwrap_or("ffmpeg").to_string();
+    let url = r.low.clone().or_else(|| r.medium.clone()).or_else(|| r.high.clone()).unwrap_or_else(|| die("snapshot_ffmpeg needs an RTSP stream".into()));
+    snapshot::Source::Ffmpeg(bin, url)
+}
+
 /// `snapshot <config> <out.jpg>`: fetch the picture the Home app would get.
 fn snapshot_test(cfg: &Config, out: &str) {
     let source = if let Some(u) = &cfg.snapshot_url {
         snapshot::Source::Url(u.clone())
+    } else if cfg.snapshot_ffmpeg.is_some() {
+        let mut ch = cfg.rtsp.clone();
+        if let Some(oc) = &cfg.onvif {
+            connect_onvif(oc, &mut ch);
+        }
+        ffmpeg_source(cfg.snapshot_ffmpeg.as_deref(), &ch)
     } else if let Some(p) = &cfg.protect {
         let host = p.host.clone().or_else(|| rtsp_host(&cfg.rtsp)).unwrap_or_else(|| die("[protect] host?".into()));
         snapshot::Source::Protect(Arc::new(protect::Protect::new(&host, &p.token, &p.camera_id, p.cert_sha256.as_deref()).unwrap_or_else(|e| die(e))))

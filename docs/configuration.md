@@ -20,6 +20,7 @@ starting point.
 | `ring_listen` | none | `"0.0.0.0:8780"`: listen for the event endpoints below; a different port per camera |
 | `ring_token` | required with `ring_listen` | Bearer token for those requests |
 | `snapshot_url` | from `[protect]` or `[onvif]` | `http://[user:pass@]host/path` returning a JPEG (Basic or Digest); overrides the backends |
+| `snapshot_ffmpeg` | unset | Grab snapshots from the RTSP stream with ffmpeg (which you install): `"ffmpeg"` from PATH, or its full path. Used when `snapshot_url` isn't set; overrides the backends. See [generic-cameras.md](generic-cameras.md#snapshots-from-the-stream-ffmpeg) |
 
 `state_dir` defaults to systemd's `$STATE_DIRECTORY` (`/var/lib/rust-homekit-cam/<name>`) when
 run by the unit. Run from a shell (`code`, `reset`), it defaults to

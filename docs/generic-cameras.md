@@ -8,7 +8,7 @@ Any camera (or NVR) with an **H.264** RTSP stream works. If it speaks ONVIF (mos
 | H.264 video | live view, HomeKit Secure Video (with a motion source) |
 | an Opus audio track | camera audio in live view |
 | an AAC audio track | audio in recordings |
-| a JPEG snapshot URL | pictures in tiles and notifications |
+| a JPEG snapshot URL, or ffmpeg installed | pictures in tiles and notifications |
 
 Two-way audio needs a vendor backend; only UniFi Protect has one so far (ONVIF back-channels
 usually need audio conversion, which isn't done).
@@ -26,6 +26,32 @@ Use the main stream as `high` and the sub stream as `low`.
 
 `rust-homekit-cam probe <config>` connects to each URL and reports the tracks and frames it
 receives, which is the quickest way to check a URL.
+
+## Snapshots from the stream (ffmpeg)
+
+If the camera has no snapshot URL, rust-homekit-cam can grab one frame from the RTSP stream with
+**ffmpeg**. ffmpeg isn't bundled or required: install it only if you need this.
+
+```bash
+apt install ffmpeg          # Debian/Ubuntu (brew install ffmpeg on a Mac)
+```
+
+```toml
+snapshot_ffmpeg = "ffmpeg"  # from PATH, or the full path, e.g. "/usr/bin/ffmpeg"
+```
+
+Prefer not to install it? Any executable that takes ffmpeg's arguments works, such as a wrapper
+around a container (needs Docker; adds about half a second):
+
+```sh
+#!/bin/sh
+exec docker run --rm -i lscr.io/linuxserver/ffmpeg:latest "$@"
+```
+
+Each snapshot runs `ffmpeg` once on the sub stream (`low`, else `medium`/`high`), which takes
+about a second or two depending on the camera's keyframe interval. Pictures are cached for 5 s,
+and a ring or motion fetches a new one. Check it with `rust-homekit-cam snapshot <config>
+test.jpg`. A working `snapshot_url` is still faster and lighter.
 
 ## Rings and motion from Home Assistant
 
