@@ -62,16 +62,70 @@ struct Rewriter {
     seq: u16,
     ts_offset: u32,
     pub last_ts: u32,
+    /// Opus only: repack single-frame packets to this packet time (ms), 0 = as they come
+    ptime: u32,
+    /// frames waiting to be packed: (TOC config|stereo bits, timestamp of the first, frames)
+    pending: Option<(u8, u32, Vec<Vec<u8>>)>,
+}
+
+/// Duration of one Opus frame from its TOC byte, in units of 0.1 ms (RFC 6716 3.1).
+fn opus_frame_tenths(toc: u8) -> u32 {
+    let c = toc >> 3;
+    match c {
+        0..=11 => [100, 200, 400, 600][(c % 4) as usize],
+        12..=15 => [100, 200][(c % 2) as usize],
+        _ => [25, 50, 100, 200][(c % 4) as usize],
+    }
+}
+
+/// Several frames with the same TOC configuration as one Opus packet: code 3, VBR (RFC 6716 3.2.5).
+fn opus_pack(toc: u8, frames: &[Vec<u8>]) -> Vec<u8> {
+    if frames.len() == 1 {
+        let mut p = vec![toc & !3];
+        p.extend_from_slice(&frames[0]);
+        return p;
+    }
+    let mut p = vec![(toc & !3) | 3, 0x80 | frames.len() as u8];
+    for f in &frames[..frames.len() - 1] {
+        let n = f.len();
+        if n < 252 {
+            p.push(n as u8);
+        } else {
+            let first = 252 + (n & 3);
+            p.push(first as u8);
+            p.push(((n - first) >> 2) as u8);
+        }
+    }
+    for f in frames {
+        p.extend_from_slice(f);
+    }
+    p
 }
 
 impl Rewriter {
     fn new(pt: u8, ssrc: u32) -> Self {
-        Rewriter { pt, ssrc, seq: OsRng.next_u32() as u16, ts_offset: OsRng.next_u32(), last_ts: 0 }
+        Rewriter { pt, ssrc, seq: OsRng.next_u32() as u16, ts_offset: OsRng.next_u32(), last_ts: 0, ptime: 0, pending: None }
     }
 
-    fn rewrite(&mut self, pkt: &[u8]) -> Option<Vec<u8>> {
+    fn opus(pt: u8, ssrc: u32, ptime: u32) -> Self {
+        Rewriter { ptime, ..Self::new(pt, ssrc) }
+    }
+
+    fn packet(&mut self, ts: u32, marker: bool, payload: &[u8]) -> Vec<u8> {
+        self.last_ts = ts;
+        let mut out = vec![0x80, self.pt | if marker { 0x80 } else { 0 }];
+        out.extend_from_slice(&self.seq.to_be_bytes());
+        out.extend_from_slice(&ts.to_be_bytes());
+        out.extend_from_slice(&self.ssrc.to_be_bytes());
+        out.extend_from_slice(payload);
+        self.seq = self.seq.wrapping_add(1);
+        out
+    }
+
+    /// One incoming RTP packet → zero or more outgoing packets.
+    fn rewrite(&mut self, pkt: &[u8], out: &mut Vec<Vec<u8>>) {
         if pkt.len() < 13 || pkt[0] >> 6 != 2 {
-            return None;
+            return;
         }
         let mut off = 12 + 4 * (pkt[0] & 0x0f) as usize;
         if pkt[0] & 0x10 != 0 && pkt.len() >= off + 4 {
@@ -79,20 +133,38 @@ impl Rewriter {
         }
         let mut end = pkt.len();
         if pkt[0] & 0x20 != 0 {
-            end = end.saturating_sub(*pkt.last()? as usize);
+            end = end.saturating_sub(pkt[pkt.len() - 1] as usize);
         }
         if off >= end {
-            return None;
+            return;
         }
-        let ts = u32::from_be_bytes(pkt[4..8].try_into().ok()?).wrapping_add(self.ts_offset);
-        self.last_ts = ts;
-        let mut out = vec![0x80, self.pt | (pkt[1] & 0x80)];
-        out.extend_from_slice(&self.seq.to_be_bytes());
-        out.extend_from_slice(&ts.to_be_bytes());
-        out.extend_from_slice(&self.ssrc.to_be_bytes());
-        out.extend_from_slice(&pkt[off..end]);
-        self.seq = self.seq.wrapping_add(1);
-        Some(out)
+        let Ok(ts) = pkt[4..8].try_into().map(u32::from_be_bytes) else { return };
+        let ts = ts.wrapping_add(self.ts_offset);
+        let payload = &pkt[off..end];
+        let marker = pkt[1] & 0x80 != 0;
+        let toc = payload[0];
+        let per = if self.ptime > 0 && toc & 3 == 0 { (self.ptime * 10 / opus_frame_tenths(toc)).max(1) } else { 1 };
+        if per <= 1 || per * opus_frame_tenths(toc) > 1200 {
+            self.flush(out);
+            out.push(self.packet(ts, marker, payload));
+            return;
+        }
+        let key = toc & 0xfc;
+        if self.pending.as_ref().is_some_and(|(k, _, _)| *k != key) {
+            self.flush(out);
+        }
+        let p = self.pending.get_or_insert((key, ts, Vec::new()));
+        p.2.push(payload[1..].to_vec());
+        if p.2.len() as u32 >= per {
+            self.flush(out);
+        }
+    }
+
+    fn flush(&mut self, out: &mut Vec<Vec<u8>>) {
+        if let Some((key, ts, frames)) = self.pending.take() {
+            let payload = opus_pack(key, &frames);
+            out.push(self.packet(ts, false, &payload));
+        }
     }
 }
 
@@ -176,7 +248,8 @@ fn run(ep: &Endpoint, req: &Request, url: &str, stop: &AtomicBool, conn: &Mutex<
     }
     client.play()?;
     let audio_dest = SocketAddr::new(ep.controller, ep.audio_port);
-    let mut audio = opus.and(req.audio.as_ref()).map(|a| (Rewriter::new(a.pt, ep.audio_ssrc), srtp::Sender::new(&ep.audio_srtp_out)));
+    let mut audio = opus.and(req.audio.as_ref()).map(|a| (Rewriter::opus(a.pt, ep.audio_ssrc, a.ptime), srtp::Sender::new(&ep.audio_srtp_out)));
+    let mut a_out = Vec::new();
     let (mut a_count, mut a_octets, mut a_logged) = (0u32, 0u32, false);
 
     let dest = SocketAddr::new(ep.controller, ep.video_port);
@@ -193,7 +266,8 @@ fn run(ep: &Endpoint, req: &Request, url: &str, stop: &AtomicBool, conn: &Mutex<
         let (ch, data) = client.next()?;
         if ch == 2 {
             if let Some((rw, sr)) = &mut audio {
-                if let Some(p) = rw.rewrite(&data) {
+                rw.rewrite(&data, &mut a_out);
+                for p in a_out.drain(..) {
                     if !a_logged {
                         a_logged = true;
                         let toc = p[12];
@@ -259,12 +333,15 @@ fn talkback(sock: Arc<std::net::UdpSocket>, key: Vec<u8>, protect: &Protect, sto
             bad += 1;
             continue;
         };
-        let Some(pkt) = rw.rewrite(&rtp) else { continue };
-        got += 1;
-        if got == 1 {
-            crate::log(format!("talkback: first packet from the controller ({} bytes Opus)", pkt.len() - 12));
+        let mut pkts = Vec::new();
+        rw.rewrite(&rtp, &mut pkts);
+        for pkt in pkts {
+            got += 1;
+            if got == 1 {
+                crate::log(format!("talkback: first packet from the controller ({} bytes Opus)", pkt.len() - 12));
+            }
+            let _ = out.send_to(&pkt, tb.addr);
         }
-        let _ = out.send_to(&pkt, tb.addr);
     }
     if got > 0 || bad > 0 {
         crate::log(format!("talkback: {got} packets forwarded, {bad} rejected"));
@@ -301,7 +378,40 @@ mod tests {
         assert_eq!(only_high.pick(100).unwrap().0, "high");
         assert_eq!(sender_report(1, 2, 3, 4).len(), 28);
         let mut rw = Rewriter::new(110, 0x11223344);
-        let out = rw.rewrite(&[0x80, 0x80 | 96, 0, 5, 0, 0, 0, 10, 9, 9, 9, 9, 0xfc, 1, 2]).unwrap();
-        assert_eq!((out[1], &out[8..12], &out[12..]), (0x80 | 110, &[0x11, 0x22, 0x33, 0x44][..], &[0xfc, 1, 2][..]));
+        let mut out = Vec::new();
+        rw.rewrite(&[0x80, 0x80 | 96, 0, 5, 0, 0, 0, 10, 9, 9, 9, 9, 0xfc, 1, 2], &mut out);
+        assert_eq!((out[0][1], &out[0][8..12], &out[0][12..]), (0x80 | 110, &[0x11, 0x22, 0x33, 0x44][..], &[0xfc, 1, 2][..]));
+    }
+
+    #[test]
+    fn opus_frames_packed_to_60_ms() {
+        // config 23 = CELT fullband 20 ms, mono, code 0 (TOC 0xb8), as Protect sends
+        assert_eq!(opus_frame_tenths(0xb8), 200);
+        let mut rw = Rewriter::opus(110, 1, 60);
+        let mut out = Vec::new();
+        let frame = |ts: u32, n: usize| {
+            let mut p = vec![0x80, 96, 0, 0];
+            p.extend_from_slice(&ts.to_be_bytes());
+            p.extend_from_slice(&[0, 0, 0, 9, 0xb8]);
+            p.extend(std::iter::repeat_n(7u8, n));
+            p
+        };
+        rw.rewrite(&frame(0, 100), &mut out);
+        rw.rewrite(&frame(960, 300), &mut out);
+        assert!(out.is_empty());
+        rw.rewrite(&frame(1920, 50), &mut out);
+        assert_eq!(out.len(), 1);
+        let p = &out[0][12..];
+        // code 3, VBR, 3 frames; lengths 100 and 300 (two-byte: 252 + 0, (300-252)/4 = 12)
+        assert_eq!(&p[..5], &[0xbb, 0x83, 100, 252, 12]);
+        assert_eq!(p.len(), 5 + 100 + 300 + 50);
+        // timestamp of the first frame
+        assert_eq!(u32::from_be_bytes(out[0][4..8].try_into().unwrap()), rw.ts_offset);
+        // at 20 ms: passed through as is
+        let mut rw20 = Rewriter::opus(110, 1, 20);
+        let mut o = Vec::new();
+        rw20.rewrite(&frame(0, 10), &mut o);
+        assert_eq!(o.len(), 1);
+        assert_eq!(o[0][12], 0xb8);
     }
 }
