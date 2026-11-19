@@ -65,6 +65,8 @@ pub struct Camera {
     muted: Mutex<(bool, bool, u8)>, // microphone, speaker, volume
     channels: Channels,
     protect: Option<Arc<crate::protect::Protect>>,
+    /// the stream's orientation (from its SPS), None = unknown: offer both
+    portrait: Option<bool>,
     snapshots: Option<Arc<crate::snapshot::Snapshots>>,
     /// Motion Sensor service, when there is a motion source
     motion: Option<Arc<std::sync::atomic::AtomicBool>>,
@@ -74,6 +76,12 @@ pub struct Camera {
 }
 
 impl Camera {
+    /// The stream's size, to offer matching resolutions.
+    pub fn with_size(mut self, size: Option<(u16, u16)>) -> Self {
+        self.portrait = size.map(|(w, h)| h > w);
+        self
+    }
+
     pub fn new(name: &str, doorbell: bool, channels: Channels, protect: Option<Arc<crate::protect::Protect>>) -> Self {
         Camera {
             name: name.into(),
@@ -85,6 +93,7 @@ impl Camera {
             muted: Mutex::new((false, false, 100)),
             channels,
             protect,
+            portrait: None,
             snapshots: None,
             motion: None,
             hksv: None,
@@ -114,15 +123,21 @@ impl Camera {
         self
     }
 
-    fn supported_video() -> Tlv {
-        // Advertised sizes: what the iPhone may ask for. We send the Protect channel that fits
-        // (the real size is in the SPS; iOS decodes whatever comes). Portrait sizes for the
-        // 3:4 doorbell are included.
-        let sizes: [(u16, u16); 12] = [
+    fn supported_video(&self) -> Tlv {
+        // Advertised sizes: what the iPhone may ask for. We send the channel that fits (the real
+        // size is in the SPS; iOS decodes whatever comes). Offer the camera's own orientation
+        // only: with portrait sizes listed, iPhones ask a landscape camera for 480x640 at
+        // ~164 kbps, i.e. the lowest channel.
+        const LANDSCAPE: &[(u16, u16)] = &[
             (1920, 1080), (1280, 720), (640, 360), (480, 270), (320, 180),
             (1280, 960), (1024, 768), (640, 480), (480, 360), (320, 240),
-            (1080, 1440), (480, 640),
         ];
+        const PORTRAIT: &[(u16, u16)] = &[(1080, 1440), (960, 1280), (720, 960), (480, 640), (360, 480), (240, 320)];
+        let sizes: Vec<(u16, u16)> = match self.portrait {
+            Some(false) => LANDSCAPE.to_vec(),
+            Some(true) => PORTRAIT.to_vec(),
+            None => LANDSCAPE.iter().chain(&[(1080, 1440), (480, 640)]).copied().collect(),
+        };
         let params = Tlv::new().u8(1, 0).u8(1, 1).u8(1, 2).u8(2, 0).u8(2, 1).u8(2, 2).u8(3, 0);
         // attributes: repeated type-3 items, separated
         let mut cfg = Tlv::new().u8(1, H264).tlv(2, params);
@@ -294,7 +309,7 @@ impl Accessory for Camera {
             ]}),
             json!({"iid": 8, "type": "A2", "characteristics": [ch(9, "37", "string", PR, json!({"value": "1.1.0"}))]}),
             json!({"iid": 10, "type": "110", "characteristics": [
-                ch(11, "114", "tlv8", PR, json!({"value": Self::supported_video().base64()})),
+                ch(11, "114", "tlv8", PR, json!({"value": self.supported_video().base64()})),
                 ch(12, "115", "tlv8", PR, json!({"value": Self::supported_audio().base64()})),
                 ch(13, "116", "tlv8", PR, json!({"value": Self::supported_rtp().base64()})),
                 ch(SETUP_ENDPOINTS, "118", "tlv8", PR_PW, json!({})),
@@ -347,7 +362,7 @@ impl Accessory for Camera {
         }
         let m = *self.muted.lock().unwrap();
         Ok(match iid {
-            11 => json!(Self::supported_video().base64()),
+            11 => json!(self.supported_video().base64()),
             12 => json!(Self::supported_audio().base64()),
             13 => json!(Self::supported_rtp().base64()),
             SETUP_ENDPOINTS => json!(tlv::b64(self.setup_reply.lock().unwrap().get(&conn.id).map(Vec::as_slice).unwrap_or(&[]))),

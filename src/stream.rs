@@ -25,10 +25,15 @@ pub struct Channels {
     pub allow_high: bool,
 }
 
+/// Requests at or below this (kbps) get the low channel first: a weak remote link.
+const LOW_KBPS: u64 = 150;
+
 impl Channels {
     /// The channel for a requested max bitrate (kbps).
     pub fn pick(&self, kbps: u64) -> Option<(&'static str, &str)> {
-        let order: &[(&'static str, &Option<String>)] = if kbps <= 500 {
+        // Medium unless the controller asks for very little (a weak remote link): on these
+        // cameras it starts as fast as Low and looks far better; High only on request.
+        let order: &[(&'static str, &Option<String>)] = if kbps <= LOW_KBPS {
             &[("low", &self.low), ("medium", &self.medium), ("high", &self.high)]
         } else if kbps >= 4000 && self.allow_high {
             &[("high", &self.high), ("medium", &self.medium), ("low", &self.low)]
@@ -345,6 +350,7 @@ impl RtcpStats {
 }
 
 fn run(ep: &Endpoint, req: &Request, url: &str, stop: &AtomicBool, conn: &Mutex<Option<TcpStream>>) -> Result<(), String> {
+    let t0 = Instant::now();
     let (mut client, tracks) = rtsp::Client::connect(url)?;
     *conn.lock().unwrap() = client.stream();
     let video = tracks.iter().find(|t| t.codec == "h264").ok_or("no H.264 track (is the camera on H.265?)")?;
@@ -401,6 +407,9 @@ fn run(ep: &Endpoint, req: &Request, url: &str, stop: &AtomicBool, conn: &Mutex<
             pack.push(&n, &mut pkts);
         }
         for p in pkts.drain(..) {
+            if first_ts.is_none() {
+                crate::log(format!("stream: first video frame sent {} ms after start (RTSP connect included)", t0.elapsed().as_millis()));
+            }
             first_ts.get_or_insert(pack.last_ts);
             count = count.wrapping_add(1);
             octets = octets.wrapping_add((p.len() - 12) as u32);
@@ -494,7 +503,8 @@ mod tests {
     #[test]
     fn channel_choice() {
         let c = Channels { high: Some("h".into()), medium: Some("m".into()), low: Some("l".into()), ..Default::default() };
-        assert_eq!(c.pick(164).unwrap().0, "low");
+        assert_eq!(c.pick(132).unwrap().0, "low");
+        assert_eq!(c.pick(164).unwrap().0, "medium");
         assert_eq!(c.pick(2000).unwrap().0, "medium");
         assert_eq!(c.pick(8000).unwrap().0, "medium");
         let c2 = Channels { allow_high: true, ..c.clone() };

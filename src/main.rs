@@ -206,6 +206,7 @@ fn main() {
             let cam = Arc::new(
                 camera::Camera::new(&cfg.name, cfg.doorbell, cfg.rtsp.clone(), protect.clone().filter(|_| cfg.talkback.unwrap_or(true)))
                     .with_info(cfg.manufacturer.clone(), cfg.model.clone())
+                    .with_size(video_size(&cfg.rtsp))
                     .with_snapshots(snapshots.clone())
                     .with_motion(motion_state.clone())
                     .with_hksv(hksv.clone()),
@@ -363,6 +364,21 @@ fn onvif_info(cfg: &Config) {
     std::thread::sleep(std::time::Duration::from_secs(30));
 }
 
+/// The video size from a stream's SPS (DESCRIBE only), to offer resolutions in the right
+/// orientation. None if no stream answers.
+fn video_size(ch: &stream::Channels) -> Option<(u16, u16)> {
+    let url = ch.medium.as_ref().or(ch.high.as_ref()).or(ch.low.as_ref())?;
+    let size = rtsp::Client::connect(url).ok().and_then(|(_, tracks)| {
+        let v = tracks.iter().find(|t| t.codec == "h264")?;
+        v.params.iter().find(|p| p.first().map(|b| b & 0x1f) == Some(7)).and_then(|sps| mp4::sps_size(sps))
+    });
+    match size {
+        Some((w, h)) => log(format!("video: {w}x{h} ({}): offering {} sizes", if h > w { "portrait" } else { "landscape" }, if h > w { "portrait" } else { "landscape" })),
+        None => log("video: size unknown (stream not reachable now): offering landscape and portrait sizes".into()),
+    }
+    size
+}
+
 /// The console's host, from any RTSP URL.
 fn rtsp_host(ch: &stream::Channels) -> Option<String> {
     let url = ch.low.as_ref().or(ch.medium.as_ref()).or(ch.high.as_ref())?;
@@ -413,6 +429,7 @@ fn probe(ch: &stream::Channels) {
     for (name, url) in [("high", &ch.high), ("medium", &ch.medium), ("low", &ch.low)] {
         let Some(url) = url else { continue };
         let r = (|| -> Result<String, String> {
+            let t_connect = std::time::Instant::now();
             let (mut c, tracks) = rtsp::Client::connect(url)?;
             let codecs: Vec<String> = tracks.iter().map(|t| format!("{}/{}", t.codec, t.clock)).collect();
             let v = tracks.iter().find(|t| t.codec == "h264").ok_or_else(|| format!("no H.264 track ({}): switch the camera to H.264", codecs.join(", ")))?;
@@ -426,6 +443,13 @@ fn probe(ch: &stream::Channels) {
             let (mut nals, mut types, mut max) = (Vec::new(), [0u32; 32], 0usize);
             let (mut vj, mut aj) = (stream::Jitter::default(), stream::Jitter::default());
             let mut bytes = 0usize;
+            let mut first_idr: Option<std::time::Duration> = None;
+            let mut size = String::new();
+            if let Some(sps) = v.params.iter().find(|p| p.first().map(|b| b & 0x1f) == Some(7)) {
+                if let Some((w, h)) = mp4::sps_size(sps) {
+                    size = format!("{w}x{h}, ");
+                }
+            }
             let t0 = std::time::Instant::now();
             while t0.elapsed().as_secs() < 5 {
                 let (chn, p) = c.next()?;
@@ -434,6 +458,9 @@ fn probe(ch: &stream::Channels) {
                     bytes += p.len();
                     vj.push(&p, v.clock);
                     d.push(&p, &mut nals);
+                    if first_idr.is_none() && nals.iter().any(|n| n.data[0] & 0x1f == 5) {
+                        first_idr = Some(t_connect.elapsed());
+                    }
                 } else if chn == 2 {
                     aj.push(&p, a.map(|a| a.clock).unwrap_or(48_000));
                 }
@@ -443,8 +470,8 @@ fn probe(ch: &stream::Channels) {
             }
             let audio = if a.is_some() { format!(", audio {:.0} ms (worst {:.0})", aj.j, aj.worst) } else { String::new() };
             Ok(format!(
-                "tracks {codecs:?}, video {} kbps, sprop {}, max pkt {max}, NALs: idr {} non-idr {} sps {} pps {}; arrival jitter: video {:.0} ms (worst {:.0}){audio}",
-                bytes * 8 / 5000, v.params.len(), types[5], types[1], types[7], types[8], vj.j, vj.worst
+                "{size}first keyframe after {} ms, tracks {codecs:?}, video {} kbps, sprop {}, max pkt {max}, NALs: idr {} non-idr {} sps {} pps {}; arrival jitter: video {:.0} ms (worst {:.0}){audio}",
+                first_idr.map(|d| d.as_millis()).unwrap_or(0), bytes * 8 / 5000, v.params.len(), types[5], types[1], types[7], types[8], vj.j, vj.worst
             ))
         })();
         println!("{name}: {}", r.unwrap_or_else(|e| format!("error: {e}")));
