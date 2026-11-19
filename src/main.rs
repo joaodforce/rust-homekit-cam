@@ -8,6 +8,7 @@ mod h264;
 mod hap;
 mod hds;
 mod hksv;
+mod mdns;
 mod mp4;
 mod onvif;
 mod httpc;

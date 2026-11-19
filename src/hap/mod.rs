@@ -76,7 +76,7 @@ struct Inner {
     id: Identity,
     store: Mutex<Store>,
     sessions: Mutex<HashMap<u64, Session>>,
-    advert: Mutex<Option<mdns_sd::ServiceDaemon>>,
+    mdns: crate::mdns::Mdns,
 }
 
 #[derive(Clone)]
@@ -104,7 +104,7 @@ impl Server {
             id,
             store: Mutex::new(store),
             sessions: Mutex::new(HashMap::new()),
-            advert: Mutex::new(None),
+            mdns: crate::mdns::Mdns::start(),
         }));
         s.advertise();
         let srv = s.clone();
@@ -164,27 +164,12 @@ impl Server {
         .into_iter()
         .map(|(k, v)| (k.to_string(), v))
         .collect();
-        // One daemon for the process; re-registering the same name updates the TXT record in
-        // place (no goodbye packets, which can leave a controller unable to find us right
-        // after pair-setup).
-        let mut adv = self.0.advert.lock().unwrap();
-        let port = self.0.port;
+        // Published through the host's shared responder (see mdns.rs). Re-publishing the same
+        // name updates the TXT record in place: no goodbye packets, which can leave a controller
+        // unable to find us right after pair-setup.
         let host = format!("{}.local.", st.device_id.replace(':', ""));
-        let result = (|| -> Result<(), String> {
-            if adv.is_none() {
-                let d = mdns_sd::ServiceDaemon::new().map_err(|e| e.to_string())?;
-                d.disable_interface(mdns_sd::IfKind::IPv6).map_err(|e| e.to_string())?;
-                *adv = Some(d);
-            }
-            let info = mdns_sd::ServiceInfo::new("_hap._tcp.local.", &name, &host, "", port, txt)
-                .map_err(|e| e.to_string())?
-                .enable_addr_auto();
-            adv.as_ref().unwrap().register(info).map_err(|e| e.to_string())
-        })();
-        match result {
-            Ok(()) => log(format!("advertised (c#={cn}, sf={})", if st.paired() { 0 } else { 1 })),
-            Err(e) => log(format!("mdns: {e}")),
-        }
+        self.0.mdns.publish(crate::mdns::Advert { name, host, port: self.0.port, txt });
+        log(format!("advertised (c#={cn}, sf={})", if st.paired() { 0 } else { 1 }));
     }
 
     fn connection(&self, n: u64, stream: TcpStream) {
