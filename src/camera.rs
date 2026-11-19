@@ -303,11 +303,15 @@ impl Accessory for Camera {
                 ch(STREAM_ACTIVE, "B0", "uint8", PR_PW_EV, json!({"minValue": 0, "maxValue": 1, "minStep": 1})),
             ]}),
             json!({"iid": 20, "type": "112", "characteristics": [ch(21, "11A", "bool", PR_PW_EV, json!({}))]}),
-            json!({"iid": 30, "type": "113", "characteristics": [
+        ];
+        // the Speaker service is what makes the Home app show the talk button: only with a
+        // talk-back backend (changes c#, so controllers refetch without a re-add)
+        if self.protect.is_some() {
+            list.push(json!({"iid": 30, "type": "113", "characteristics": [
                 ch(31, "11A", "bool", PR_PW_EV, json!({})),
                 ch(32, "119", "uint8", PR_PW_EV, json!({"minValue": 0, "maxValue": 100, "minStep": 1, "unit": "percentage"})),
-            ]}),
-        ];
+            ]}));
+        }
         if self.doorbell {
             list.push(json!({"iid": 40, "type": "121", "primary": true, "characteristics": [
                 ch(SWITCH_EVENT, "73", "uint8", PR_EV, json!({"minValue": 0, "maxValue": 0, "validValues": [0]})),
@@ -422,9 +426,10 @@ mod tests {
         let cam = Camera::new("Doorbell", true, Channels::default(), None);
         let s = cam.services("AA:BB");
         let types: Vec<&str> = s.as_array().unwrap().iter().map(|s| s["type"].as_str().unwrap()).collect();
-        assert_eq!(types, ["3E", "A2", "110", "112", "113", "121"]);
+        // no talk-back backend: no Speaker (113), so no talk button in the Home app
+        assert_eq!(types, ["3E", "A2", "110", "112", "121"]);
         assert_eq!(cam.read(conn(), SWITCH_EVENT), Ok(Value::Null));
-        assert!(Camera::new("Cam", false, Channels::default(), None).services("x").as_array().unwrap().len() == 5);
+        assert!(Camera::new("Cam", false, Channels::default(), None).services("x").as_array().unwrap().len() == 4);
     }
 
     #[test]
