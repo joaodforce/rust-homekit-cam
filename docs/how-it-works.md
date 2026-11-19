@@ -21,6 +21,15 @@ mDNS advert uses an IPv4-only host name of its own: an IPv6 address in the adver
 responder sends goodbye packets that can make a controller lose the accessory right after
 pair-setup.
 
+One mDNS responder per host: with several cameras (one process each) on one machine, separate
+responders would all bind UDP 5353, and Linux delivers a unicast query to just one of them,
+which can't answer for the others. So the instances elect a leader through the abstract Unix
+socket `@rust-homekit-cam-mdns` (no files, works under the systemd sandbox): the first to bind
+it runs the only responder; the others connect and send their advert as JSON lines. A follower
+that stops is withdrawn when its connection closes; if the leader stops, the followers elect a
+new one within a second. The log says which role each instance has (`mdns: …`). Off Linux each
+process is its own responder.
+
 A doorbell is category 18 (Video Doorbell), a camera 17. Services: Accessory Information,
 Camera RTP Stream Management, Microphone, Speaker, Doorbell (doorbells), Motion Sensor, and for
 HomeKit Secure Video Camera Operating Mode, Camera Event Recording Management and Data Stream
