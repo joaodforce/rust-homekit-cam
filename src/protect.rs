@@ -96,10 +96,18 @@ impl Protect {
     }
 
     /// One API request; on HTTP 429 (the console's rate limit, hit when several cameras or the
-    /// setup helper ask at once) waits as told by Retry-After (else 1 s, 2 s) and retries.
+    /// setup helper ask at once) waits as told by Retry-After (else 1 s, 2 s) and retries; a
+    /// connection closed without a response is retried twice.
     fn request(&self, method: &str, path: &str, body: &str, accept: &str) -> Result<Vec<u8>, String> {
         for attempt in 0.. {
-            let r = self.request_once(method, path, body, accept)?;
+            // the console sometimes closes without answering (busy): retry that too
+            let r = match self.request_once(method, path, body, accept) {
+                Err(e) if attempt < 2 && e.contains("no HTTP response") => {
+                    std::thread::sleep(Duration::from_millis(500));
+                    continue;
+                }
+                r => r?,
+            };
             match r.status {
                 200 => return Ok(r.body),
                 429 if attempt < 3 => {
