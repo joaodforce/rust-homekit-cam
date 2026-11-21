@@ -137,7 +137,7 @@ impl Protect {
         s.write_all(req.as_bytes()).map_err(|e| format!("protect: {e}"))?;
         let mut raw = Vec::new();
         // the console closes without close_notify sometimes: keep what arrived
-        let _ = s.read_to_end(&mut raw);
+        crate::httpc::read_response(&mut s, &mut raw);
         if let Some(fp) = self.seen.lock().unwrap().take() {
             crate::log(format!("protect: certificate not pinned; to pin it set [protect] cert_sha256 = \"{fp}\""));
         }

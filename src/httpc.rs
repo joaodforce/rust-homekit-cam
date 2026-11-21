@@ -34,6 +34,39 @@ pub fn parse(raw: &[u8]) -> Result<Resp, String> {
     Ok(Resp { status, headers, body })
 }
 
+/// Read one response: stop once it is complete (by Content-Length, or the last chunk), not when
+/// the server closes. Some cameras (Intelbras snapshot.cgi) ignore `Connection: close` and keep
+/// the socket open ~10 s after the body, which made each snapshot take 20 s (twice, with Digest).
+pub fn read_response(s: &mut impl Read, raw: &mut Vec<u8>) {
+    let mut buf = [0u8; 16384];
+    loop {
+        match s.read(&mut buf) {
+            Ok(0) | Err(_) => return,
+            Ok(n) => raw.extend_from_slice(&buf[..n]),
+        }
+        if complete(raw) {
+            return;
+        }
+    }
+}
+
+/// Whether `raw` holds a whole response (headers plus the body they announce). Without a length
+/// or chunking, only the server closing ends it.
+fn complete(raw: &[u8]) -> bool {
+    let Some(end) = raw.windows(4).position(|w| w == b"\r\n\r\n") else { return false };
+    let head = String::from_utf8_lossy(&raw[..end]).to_ascii_lowercase();
+    let body = &raw[end + 4..];
+    let header = |name: &str| head.lines().find_map(|l| l.split_once(':').filter(|(k, _)| k.trim() == name).map(|(_, v)| v.trim().to_string()));
+    if header("transfer-encoding").is_some_and(|v| v.contains("chunked")) {
+        return body.ends_with(b"0\r\n\r\n");
+    }
+    if let Some(n) = header("content-length").and_then(|v| v.parse::<usize>().ok()) {
+        return body.len() >= n;
+    }
+    // no body: 204 / 304 / 1xx
+    head.split_whitespace().nth(1).is_some_and(|c| c == "204" || c == "304" || c.starts_with('1'))
+}
+
 pub fn dechunk(mut b: &[u8]) -> Vec<u8> {
     let mut out = Vec::new();
     while let Some(i) = b.windows(2).position(|w| w == b"\r\n") {
@@ -83,7 +116,7 @@ pub fn request(method: &str, url: &str, content_type: Option<&str>, body: &[u8],
         bytes.extend_from_slice(body);
         s.write_all(&bytes).map_err(|e| e.to_string())?;
         let mut raw = Vec::new();
-        let _ = s.read_to_end(&mut raw);
+        read_response(&mut s, &mut raw);
         parse(&raw)
     };
     let r = once(None)?;
@@ -107,5 +140,35 @@ mod tests {
         assert_eq!((r.status, r.body.as_slice(), r.header("content-type")), (200, &b"\xff\xd8\xff"[..], Some("image/jpeg")));
         let r = parse(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nab\r\n1\r\nc\r\n0\r\n\r\n").unwrap();
         assert_eq!(r.body, b"abc");
+    }
+
+    /// A server that keeps the socket open after the body: the reader must not wait for it.
+    struct Lingering<'a>(&'a [u8], usize);
+    impl Read for Lingering<'_> {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if self.1 >= self.0.len() {
+                panic!("read past the end of a complete response (would block ~10 s on a camera)");
+            }
+            let n = buf.len().min(self.0.len() - self.1).min(7); // small pieces, like a slow socket
+            buf[..n].copy_from_slice(&self.0[self.1..self.1 + n]);
+            self.1 += n;
+            Ok(n)
+        }
+    }
+
+    #[test]
+    fn stops_at_the_end_of_the_response() {
+        for r in [
+            &b"HTTP/1.1 200 OK\r\nContent-Type: image/jpeg\r\nContent-Length: 5\r\n\r\n\xff\xd8abc"[..],
+            b"HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Digest realm=\"x\"\r\nContent-Length: 0\r\n\r\n",
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nab\r\n0\r\n\r\n",
+            b"HTTP/1.1 204 No Content\r\n\r\n",
+        ] {
+            let mut raw = Vec::new();
+            read_response(&mut Lingering(r, 0), &mut raw);
+            assert_eq!(raw, r);
+        }
+        let r = parse(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\n\xff\xd8abc").unwrap();
+        assert_eq!(r.body, b"\xff\xd8abc");
     }
 }

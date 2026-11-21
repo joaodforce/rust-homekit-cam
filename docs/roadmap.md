@@ -69,6 +69,10 @@ Things that work but disappoint, learned the hard way. `probe` already prints th
 - Cameras that reset quick back-to-back RTSP connections (seen: Intelbras VIP-1130-B-G4 dropped
   the third connection `probe` opened within seconds; fine on retry): retry once before
   reporting the stream as broken.
+- (fixed) Intelbras snapshot.cgi ignores `Connection: close` and lingers ~10 s after the body;
+  reading until close made each snapshot 20 s (Digest = two requests) and queued the next live
+  view behind it on the same HAP connection. Responses now end at Content-Length / last chunk.
+  Still worth a warning: snapshot sources slower than ~2 s (Quintal Frente's ONVIF one: 1.3 s).
 - Intelbras sub streams default to ~1 Mbps (704x480): fine on the LAN, too big for remote
   viewers; point at the camera's video settings page.
 
