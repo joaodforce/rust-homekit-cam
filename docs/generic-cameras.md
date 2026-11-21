@@ -17,7 +17,10 @@ usually need audio conversion, which isn't done).
 ## RTSP and snapshot URLs
 
 Typical paths; check your camera's manual, and set the stream codec to H.264 in its settings.
-Use the main stream as `high` and the sub stream as `low`.
+Use the main stream as `medium` and the sub stream as `low`, and set the sub stream to ~128 kbps
+in the camera: remote viewers (through a home hub) ask for ≤ 132 kbps, and a bigger stream
+freezes for them. Prefer one slice per frame and, for recordings, AAC audio on the main stream.
+`probe` warns about each of these.
 
 | Brand | RTSP (main / sub) | Snapshot |
 |---|---|---|
@@ -26,7 +29,14 @@ Use the main stream as `high` and the sub stream as `low`.
 | Reolink | `rtsp://user:pass@ip:554/h264Preview_01_main` / `_sub` | see the camera's API docs |
 
 `rust-homekit-cam probe <config>` connects to each URL and reports the tracks and frames it
-receives, which is the quickest way to check a URL.
+receives, which is the quickest way to check a URL, then warns about settings HomeKit handles
+badly:
+
+```
+warning: remote viewers (via a home hub, which asks for ≤132 kbps) get the low stream at 512 kbps: expect freezes; set a sub stream to ~128 kbps as `low`
+warning: low: pictures come in up to 6 slices; HomeKit may not decode them (one slice per frame is safest: check the camera's encoder settings)
+warning: recordings use the medium stream: its audio ["pcma"] isn't AAC, so they'll be silent: set transcode_audio = true, or AAC in the camera
+```
 
 ## Snapshots from the stream (ffmpeg)
 

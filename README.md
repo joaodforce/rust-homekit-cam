@@ -156,6 +156,7 @@ and remove the cameras in the Home app.
 - [Other cameras](docs/generic-cameras.md): RTSP and snapshot URLs, rings and motion from Home Assistant
 - [Troubleshooting](docs/troubleshooting.md)
 - [How it works](docs/how-it-works.md): HAP, streaming without transcoding, HKSV
+- [Roadmap](docs/roadmap.md): the web GUI planned for the next major version, and its smart warnings
 - [Development](docs/development.md): building from source, deploying from a Mac, CI and releases, layout
 
 ## License

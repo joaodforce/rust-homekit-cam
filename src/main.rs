@@ -448,10 +448,20 @@ fn record_test(ch: &stream::Channels, out: &str) {
 }
 
 /// `probe`: pull ~3 s from each configured channel and count what arrives (no secrets printed).
+/// What `probe` learned about one stream, for the warnings after the per-stream lines.
+struct Probed {
+    name: &'static str,
+    kbps: usize,
+    /// most slices seen in one picture
+    slices: u32,
+    audio: Vec<String>,
+}
+
 fn probe(ch: &stream::Channels) {
+    let mut found = Vec::new();
     for (name, url) in [("high", &ch.high), ("medium", &ch.medium), ("low", &ch.low)] {
         let Some(url) = url else { continue };
-        let r = (|| -> Result<String, String> {
+        let r = (|| -> Result<(String, Probed), String> {
             let t_connect = std::time::Instant::now();
             let (mut c, tracks) = rtsp::Client::connect(url)?;
             let codecs: Vec<String> = tracks.iter().map(|t| format!("{}/{}", t.codec, t.clock)).collect();
@@ -467,6 +477,7 @@ fn probe(ch: &stream::Channels) {
             let (mut vj, mut aj) = (stream::Jitter::default(), stream::Jitter::default());
             let mut bytes = 0usize;
             let mut first_idr: Option<std::time::Duration> = None;
+            let (mut slices, mut max_slices) = (0u32, 0u32);
             let mut size = String::new();
             if let Some(sps) = v.params.iter().find(|p| p.first().map(|b| b & 0x1f) == Some(7)) {
                 if let Some((w, h)) = mp4::sps_size(sps) {
@@ -484,19 +495,104 @@ fn probe(ch: &stream::Channels) {
                     if first_idr.is_none() && nals.iter().any(|n| n.data[0] & 0x1f == 5) {
                         first_idr = Some(t_connect.elapsed());
                     }
+                    for n in nals.drain(..) {
+                        let ty = n.data[0] & 0x1f;
+                        types[ty as usize] += 1;
+                        if ty == 1 || ty == 5 {
+                            slices += 1;
+                        }
+                        if n.last {
+                            max_slices = max_slices.max(slices);
+                            slices = 0;
+                        }
+                    }
                 } else if chn == 2 {
                     aj.push(&p, a.map(|a| a.clock).unwrap_or(48_000));
                 }
             }
-            for n in nals.drain(..) {
-                types[(n.data[0] & 0x1f) as usize] += 1;
-            }
             let audio = if a.is_some() { format!(", audio {:.0} ms (worst {:.0})", aj.j, aj.worst) } else { String::new() };
-            Ok(format!(
-                "{size}first keyframe after {} ms, tracks {codecs:?}, video {} kbps, sprop {}, max pkt {max}, NALs: idr {} non-idr {} sps {} pps {}; arrival jitter: video {:.0} ms (worst {:.0}){audio}",
-                first_idr.map(|d| d.as_millis()).unwrap_or(0), bytes * 8 / 5000, v.params.len(), types[5], types[1], types[7], types[8], vj.j, vj.worst
-            ))
+            let kbps = bytes * 8 / 5000;
+            let line = format!(
+                "{size}first keyframe after {} ms, tracks {codecs:?}, video {kbps} kbps, slices per picture up to {max_slices}, sprop {}, max pkt {max}, NALs: idr {} non-idr {} sps {} pps {}; arrival jitter: video {:.0} ms (worst {:.0}){audio}",
+                first_idr.map(|d| d.as_millis()).unwrap_or(0), v.params.len(), types[5], types[1], types[7], types[8], vj.j, vj.worst
+            );
+            let audio = tracks.iter().filter(|t| t.codec != "h264" && t.codec != "h265").map(|t| t.codec.clone()).collect();
+            Ok((line, Probed { name, kbps, slices: max_slices, audio }))
         })();
-        println!("{name}: {}", r.unwrap_or_else(|e| format!("error: {e}")));
+        match r {
+            Ok((line, p)) => {
+                println!("{name}: {line}");
+                found.push(p);
+            }
+            Err(e) => println!("{name}: error: {e}"),
+        }
+    }
+    for w in probe_warnings(&found, ch.transcode_audio, ch.pick(2000).map(|(n, _)| n), ch.pick(132).map(|(n, _)| n)) {
+        println!("warning: {w}");
+    }
+}
+
+/// Things that work but will disappoint: HomeKit limits learned the hard way (see docs).
+fn probe_warnings(found: &[Probed], transcode: bool, rec: Option<&str>, remote: Option<&str>) -> Vec<String> {
+    let mut w = Vec::new();
+    let get = |n: Option<&str>| found.iter().find(|p| Some(p.name) == n);
+    if let Some(p) = get(remote) {
+        if p.kbps > 200 {
+            w.push(format!(
+                "remote viewers (via a home hub, which asks for ≤132 kbps) get the {} stream at {} kbps: expect freezes; set a sub stream to ~128 kbps as `low`",
+                p.name, p.kbps
+            ));
+        }
+    }
+    for p in found {
+        if p.slices > 2 {
+            w.push(format!("{}: pictures come in up to {} slices; HomeKit may not decode them (one slice per frame is safest: check the camera's encoder settings)", p.name, p.slices));
+        }
+    }
+    let has = |p: &Probed, c: &[&str]| p.audio.iter().any(|a| c.contains(&a.as_str()));
+    for p in found {
+        if !transcode && !has(p, &["opus"]) && has(p, &["pcmu", "pcma", "mpeg4-generic"]) {
+            w.push(format!("{}: live view has no sound (audio {:?}, HomeKit plays Opus): set transcode_audio = true", p.name, p.audio));
+        }
+    }
+    if let Some(p) = get(rec) {
+        let aac = has(p, &["mpeg4-generic"]);
+        if !aac && !transcode && has(p, &["pcmu", "pcma", "opus"]) {
+            w.push(format!("recordings use the {} stream: its audio {:?} isn't AAC, so they'll be silent: set transcode_audio = true, or AAC in the camera", p.name, p.audio));
+        }
+        if !aac && has(p, &["pcmu", "pcma", "opus"]) {
+            if let Some(o) = found.iter().find(|o| o.name != p.name && has(o, &["mpeg4-generic"])) {
+                w.push(format!("the {} stream has AAC but recordings use {}: set AAC on {} too, and recordings copy it instead of encoding", o.name, p.name, p.name));
+            }
+        }
+    }
+    w
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn p(name: &'static str, kbps: usize, slices: u32, audio: &[&str]) -> Probed {
+        Probed { name, kbps, slices, audio: audio.iter().map(|s| s.to_string()).collect() }
+    }
+
+    #[test]
+    fn probe_warns_about_what_homekit_dislikes() {
+        // a typical cheap camera: main 2 Mbps PCMA, sub 512 kbps in 6 slices
+        let found = [p("medium", 2000, 1, &["pcma"]), p("low", 512, 6, &["pcma"])];
+        let w = probe_warnings(&found, false, Some("medium"), Some("low"));
+        assert!(w.iter().any(|x| x.contains("remote viewers") && x.contains("512 kbps")));
+        assert!(w.iter().any(|x| x.starts_with("low: pictures come in up to 6 slices")));
+        assert_eq!(w.iter().filter(|x| x.contains("live view has no sound")).count(), 2);
+        assert!(w.iter().any(|x| x.contains("recordings use the medium stream")));
+        // fixed up: sub at 128 kbps, one slice, AAC on the sub only, transcoding on
+        let found = [p("medium", 2000, 1, &["pcma"]), p("low", 128, 1, &["mpeg4-generic"])];
+        let w = probe_warnings(&found, true, Some("medium"), Some("low"));
+        assert_eq!(w.len(), 1, "{w:?}");
+        assert!(w[0].contains("the low stream has AAC but recordings use medium"));
+        // Protect-like: Opus + AAC, small low stream
+        let found = [p("medium", 500, 1, &["opus", "mpeg4-generic"]), p("low", 120, 1, &["opus", "mpeg4-generic"])];
+        assert!(probe_warnings(&found, false, Some("medium"), Some("low")).is_empty());
     }
 }

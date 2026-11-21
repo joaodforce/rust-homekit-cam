@@ -31,9 +31,9 @@ ring_token = "change-me"
 # The camera's H.264 RTSP streams: one URL is enough; with several, the one that fits the
 # bitrate the iPhone asks for is used. Credentials go in the URL (Basic or Digest).
 [rtsp]
-high = "rtsp://user:password@192.0.2.10:554/stream1"     # main stream
-low = "rtsp://user:password@192.0.2.10:554/stream2"      # sub stream
-# medium = "…"
+medium = "rtsp://user:password@192.0.2.10:554/stream1"   # main stream: LAN live view, recordings
+low = "rtsp://user:password@192.0.2.10:554/stream2"      # sub stream at ~128 kbps: remote viewers
+# high = "…"          # a third, bigger stream, if the camera has one
 # allow_high = true   # use high only when the iPhone asks for ≥ 4 Mbps (default: medium first)
 
 # ---- UniFi Protect (optional) -------------------------------------------------------------

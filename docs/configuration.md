@@ -31,7 +31,7 @@ directory: losing it means removing and re-adding the camera in the Home app.
 
 | Key | Meaning |
 |---|---|
-| `high`, `medium`, `low` | RTSP URLs of the camera's streams. One is enough. With several, live view picks the one that fits the bitrate the iPhone asks for (≤ 500 kbps: `low`; otherwise `medium`), and HomeKit Secure Video records `medium` (or the closest) |
+| `high`, `medium`, `low` | RTSP URLs of the camera's streams. One is enough. With several, live view picks the one that fits the bitrate the iPhone asks for (≤ 150 kbps, a remote viewer through a home hub: `low`; otherwise `medium`), and HomeKit Secure Video records `medium` (or the closest). Two-stream cameras: main as `medium`, sub (~128 kbps) as `low` |
 | `allow_high` | `true`: use `high` when the iPhone asks for ≥ 4 Mbps (by default `high` is only a fallback) |
 
 Credentials go in the URL: `rtsp://user:password@host:554/path` (Basic or Digest). Encode
