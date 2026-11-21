@@ -22,6 +22,8 @@ ring_token = "change-me"
 # snapshot_url = "http://user:password@192.0.2.10/cgi-bin/snapshot.cgi"
 # No snapshot URL at all? Grab a frame from the stream with ffmpeg (you install it):
 # snapshot_ffmpeg = "ffmpeg"     # or "/usr/bin/ffmpeg"
+# Pass this camera's motion (start / end) and rings on as JSON POSTs, e.g. to Home Assistant:
+# motion_webhook = "http://homeassistant.local:8123/api/webhook/camera-events"
 # Shrink snapshots for small requests (Apple Watch tiles, ~320x240): a few ms each.
 # snapshot_resize = true
 

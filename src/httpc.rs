@@ -67,6 +67,12 @@ fn complete(raw: &[u8]) -> bool {
     head.split_whitespace().nth(1).is_some_and(|c| c == "204" || c == "304" || c.starts_with('1'))
 }
 
+/// Tests: read a request (headers + Content-Length body) the way `read_response` reads replies.
+#[cfg(test)]
+pub fn read_request_for_test(s: &mut impl Read, raw: &mut Vec<u8>) {
+    read_response(s, raw)
+}
+
 pub fn dechunk(mut b: &[u8]) -> Vec<u8> {
     let mut out = Vec::new();
     while let Some(i) = b.windows(2).position(|w| w == b"\r\n") {

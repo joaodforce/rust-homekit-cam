@@ -94,6 +94,9 @@ struct Config {
     ring_listen: Option<String>,
     #[serde(default)]
     ring_token: String,
+    /// POST each Motion Sensor change and ring as JSON to this URL (plain http://), e.g. a Home
+    /// Assistant webhook: `{"camera", "event": "motion"|"ring", "state": "start"|"end"|"pressed", "source"}`
+    motion_webhook: Option<String>,
     /// A JPEG snapshot URL (http://[user:pass@]host/path); default with [protect]: Protect's.
     snapshot_url: Option<String>,
     /// Grab snapshots from the RTSP stream (sub stream first) with this ffmpeg ("ffmpeg" =
@@ -247,7 +250,14 @@ fn main() {
             );
             let server = hap::Server::start(cam, cfg.hap_port, cfg.state_dir.clone().unwrap()).unwrap_or_else(|e| die(e));
             let motion = motion_state.map(|st| events::Motion::new(camera::MOTION_DETECTED, st, std::time::Duration::from_secs(cfg.motion_hold)));
-            let ev = Arc::new(events::Events::new(server.clone(), cfg.doorbell.then_some(camera::SWITCH_EVENT), snapshots.clone(), motion));
+            if let Some(u) = &cfg.motion_webhook {
+                if !u.starts_with("http://") {
+                    die("motion_webhook: only plain http:// URLs are supported".into());
+                }
+                log(format!("events: motion and rings also go to {}", u.split('?').next().unwrap_or(u)));
+            }
+            let webhook = cfg.motion_webhook.clone().map(|url| events::Webhook { url, camera: cfg.name.clone() });
+            let ev = Arc::new(events::Events::new(server.clone(), cfg.doorbell.then_some(camera::SWITCH_EVENT), snapshots.clone(), motion).with_webhook(webhook));
             if let (Some(p), Some(pc)) = (&protect, &cfg.protect) {
                 follow_protect(p.clone(), pc.motion, ev.clone());
             }

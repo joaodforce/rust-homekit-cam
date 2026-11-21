@@ -18,6 +18,7 @@ starting point.
 | `talkback` | `true` | `false` turns two-way audio off (e.g. when the camera's speaker misbehaves) |
 | `ring_listen` | none | `"0.0.0.0:8780"`: listen for the event endpoints below; a different port per camera |
 | `ring_token` | required with `ring_listen` | Bearer token for those requests |
+| `motion_webhook` | unset | `http://…` URL that gets each Motion Sensor change and ring as a JSON POST: `{"camera": "Garagem", "event": "motion", "state": "start"}` (`"end"` when it clears; rings: `"event": "ring", "state": "pressed"`), plus `"source"` (`protect`, `onvif`, `http`, …). For Home Assistant: a webhook trigger, so HA gets every camera's motion without talking to the cameras |
 | `snapshot_url` | from `[protect]` or `[onvif]` | `http://[user:pass@]host/path` returning a JPEG (Basic or Digest); overrides the backends |
 | `snapshot_ffmpeg` | unset | Grab snapshots from the RTSP stream with ffmpeg (which you install): `"ffmpeg"` from PATH, or its full path. Used when `snapshot_url` isn't set; overrides the backends. See [generic-cameras.md](generic-cameras.md#snapshots-from-the-stream-ffmpeg) |
 | `snapshot_resize` | `false` | Shrink snapshots when the Home app asks for a much smaller image (the Apple Watch asks for ~320x240, through a home hub): decoded at 1/2–1/8 scale and re-encoded, a few ms each, a few KB instead of a few hundred. Only when the request is at most half the source's size; otherwise the original is sent. Works with every snapshot source |

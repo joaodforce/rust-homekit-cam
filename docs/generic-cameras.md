@@ -136,3 +136,31 @@ Test from a shell:
 ```bash
 curl -X POST -H "Authorization: Bearer <ring_token>" http://<service-host>:8780/ring
 ```
+
+## Motion into Home Assistant (without HA touching the cameras)
+
+`motion_webhook` sends each camera's Motion Sensor changes (and rings) on as JSON, whatever the
+source (Protect, ONVIF, HTTP), so Home Assistant needs no camera integration, credentials or
+firewall access to the cameras. One webhook can serve every camera:
+
+```toml
+motion_webhook = "http://homeassistant.local:8123/api/webhook/camera-events"
+```
+
+```yaml
+# configuration.yaml: one binary sensor per camera, driven by the webhook
+template:
+  - trigger:
+      - platform: webhook
+        webhook_id: camera-events
+        local_only: true
+    binary_sensor:
+      - name: "Garagem motion"
+        device_class: motion
+        state: >-
+          {% if trigger.json.camera == 'Garagem' and trigger.json.event == 'motion' %}{{ trigger.json.state == 'start' }}
+          {% else %}{{ this.state == 'on' }}{% endif %}
+```
+
+The body is `{"camera": "Garagem", "event": "motion", "state": "start" | "end", "source": "onvif"}`,
+or `"event": "ring", "state": "pressed"` for a doorbell press.
