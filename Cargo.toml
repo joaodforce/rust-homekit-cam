@@ -35,8 +35,8 @@ x25519-dalek = "2"
 opusic-sys = { version = "0.7", features = ["no-simd"] }
 
 # oxideav-aac 0.1.7 + two encoder speed fixes (FFT-based MDCT, allocation-free bit counting):
-# ~8x faster AAC encoding for recordings. Branch rust-homekit-cam-speed of our fork; drop this
-# once upstream has them.
+# ~8x faster AAC encoding for recordings. Branch rust-homekit-cam-speed of our fork; upstream
+# master has both fixes, so drop this once oxideav-aac 0.1.8 is released.
 [patch.crates-io]
 oxideav-aac = { git = "https://github.com/joaodforce/oxideav-aac", rev = "197da336bdb3b11e582277692c7a05b322dd8914" }
 

@@ -68,5 +68,6 @@ Things that work but disappoint, learned the hard way. `probe` already prints th
 - Switch streams mid-view when HomeKit reconfigures to a lower bitrate (now logged and ignored).
 - Encode recording audio only while recording (keep raw PCM in the prebuffer): zero idle cost.
 - ONVIF two-way audio (back-channel) for non-Protect cameras.
-- Upstream the oxideav-aac speed patches (fork: joaodforce/oxideav-aac, branch
-  `rust-homekit-cam-speed`) and drop the `[patch]`.
+- Drop the oxideav-aac `[patch]` (fork joaodforce/oxideav-aac, branch `rust-homekit-cam-speed`)
+  once oxideav-aac 0.1.8 is on crates.io: upstream master already has both speed fixes (FFT MDCT
+  in OxideAV/oxideav-aac#34, `tuple_bits` bit counting); 0.1.7 has neither.
