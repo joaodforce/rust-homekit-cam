@@ -94,9 +94,11 @@ struct Config {
     ring_listen: Option<String>,
     #[serde(default)]
     ring_token: String,
-    /// POST each Motion Sensor change and ring as JSON to this URL (plain http://), e.g. a Home
-    /// Assistant webhook: `{"camera", "event": "motion"|"ring", "state": "start"|"end"|"pressed", "source"}`
-    motion_webhook: Option<String>,
+    /// POST each Motion Sensor change and ring as JSON to this URL, or each of a list of URLs
+    /// (plain http://), e.g. a Home Assistant webhook:
+    /// `{"camera", "event": "motion"|"ring", "state": "start"|"end"|"pressed", "source"}`
+    #[serde(default)]
+    motion_webhook: OneOrMore,
     /// A JPEG snapshot URL (http://[user:pass@]host/path); default with [protect]: Protect's.
     snapshot_url: Option<String>,
     /// Grab snapshots from the RTSP stream (sub stream first) with this ffmpeg ("ffmpeg" =
@@ -117,6 +119,26 @@ struct Config {
     /// Protect RTSP URLs (rtsp://<nvr>:7447/<alias>) per channel, for live view.
     #[serde(default)]
     rtsp: stream::Channels,
+}
+
+/// A setting that takes one value or a list.
+#[derive(Deserialize, Default, Clone, Debug, PartialEq)]
+#[serde(untagged)]
+enum OneOrMore {
+    #[default]
+    None,
+    One(String),
+    More(Vec<String>),
+}
+
+impl OneOrMore {
+    fn list(&self) -> Vec<String> {
+        match self {
+            OneOrMore::None => vec![],
+            OneOrMore::One(s) => vec![s.clone()],
+            OneOrMore::More(v) => v.clone(),
+        }
+    }
 }
 
 fn yes() -> bool {
@@ -250,14 +272,14 @@ fn main() {
             );
             let server = hap::Server::start(cam, cfg.hap_port, cfg.state_dir.clone().unwrap()).unwrap_or_else(|e| die(e));
             let motion = motion_state.map(|st| events::Motion::new(camera::MOTION_DETECTED, st, std::time::Duration::from_secs(cfg.motion_hold)));
-            if let Some(u) = &cfg.motion_webhook {
-                if !u.starts_with("http://") {
+            let webhooks: Vec<events::Webhook> = cfg.motion_webhook.list().into_iter().map(|url| events::Webhook { url, camera: cfg.name.clone() }).collect();
+            for w in &webhooks {
+                if !w.url.starts_with("http://") {
                     die("motion_webhook: only plain http:// URLs are supported".into());
                 }
-                log(format!("events: motion and rings also go to {}", u.split('?').next().unwrap_or(u)));
+                log(format!("events: motion and rings also go to {}", w.shown()));
             }
-            let webhook = cfg.motion_webhook.clone().map(|url| events::Webhook { url, camera: cfg.name.clone() });
-            let ev = Arc::new(events::Events::new(server.clone(), cfg.doorbell.then_some(camera::SWITCH_EVENT), snapshots.clone(), motion).with_webhook(webhook));
+            let ev = Arc::new(events::Events::new(server.clone(), cfg.doorbell.then_some(camera::SWITCH_EVENT), snapshots.clone(), motion).with_webhooks(webhooks));
             if let (Some(p), Some(pc)) = (&protect, &cfg.protect) {
                 follow_protect(p.clone(), pc.motion, ev.clone());
             }
@@ -630,6 +652,19 @@ mod tests {
 
     fn p(name: &'static str, kbps: usize, slices: u32, audio: &[&str]) -> Probed {
         Probed { name, kbps, slices, audio: audio.iter().map(|s| s.to_string()).collect() }
+    }
+
+    #[test]
+    fn motion_webhook_takes_one_url_or_a_list() {
+        #[derive(Deserialize)]
+        struct C {
+            #[serde(default)]
+            motion_webhook: OneOrMore,
+        }
+        let p = |s: &str| toml::from_str::<C>(s).unwrap().motion_webhook.list();
+        assert!(p("").is_empty());
+        assert_eq!(p(r#"motion_webhook = "http://a""#), vec!["http://a"]);
+        assert_eq!(p(r#"motion_webhook = ["http://a", "http://b"]"#), vec!["http://a", "http://b"]);
     }
 
     #[test]

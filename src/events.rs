@@ -21,7 +21,7 @@ pub struct Events {
     pub snapshots: Option<Arc<crate::snapshot::Snapshots>>,
     pub motion: Option<Motion>,
     last_ring: Mutex<Option<Instant>>,
-    webhook: Option<Arc<Webhook>>,
+    webhooks: Vec<Arc<Webhook>>,
 }
 
 /// Where state changes go: `{"camera": name, "event": "motion"|"ring", "state": …, "source": …}`.
@@ -37,10 +37,17 @@ impl Webhook {
         std::thread::spawn(move || {
             match crate::httpc::request("POST", &w.url, Some("application/json"), body.as_bytes(), Duration::from_secs(5)) {
                 Ok(r) if (200..300).contains(&r.status) => {}
-                Ok(r) => crate::log(format!("motion_webhook: HTTP {}", r.status)),
-                Err(e) => crate::log(format!("motion_webhook: {e}")),
+                Ok(r) => crate::log(format!("motion_webhook {}: HTTP {}", w.shown(), r.status)),
+                Err(e) => crate::log(format!("motion_webhook {}: {e}", w.shown())),
             }
         });
+    }
+}
+
+impl Webhook {
+    /// The URL for logs: without the query (it may carry a token).
+    pub fn shown(&self) -> &str {
+        self.url.split('?').next().unwrap_or(&self.url)
     }
 }
 
@@ -64,11 +71,11 @@ impl Motion {
 
 impl Events {
     pub fn new(server: Server, ring_iid: Option<u64>, snapshots: Option<Arc<crate::snapshot::Snapshots>>, motion: Option<Motion>) -> Self {
-        Events { server, ring_iid, snapshots, motion, last_ring: Mutex::new(None), webhook: None }
+        Events { server, ring_iid, snapshots, motion, last_ring: Mutex::new(None), webhooks: Vec::new() }
     }
 
-    pub fn with_webhook(mut self, w: Option<Webhook>) -> Self {
-        self.webhook = w.map(Arc::new);
+    pub fn with_webhooks(mut self, w: Vec<Webhook>) -> Self {
+        self.webhooks = w.into_iter().map(Arc::new).collect();
         self
     }
 
@@ -83,7 +90,7 @@ impl Events {
             *last = Some(Instant::now());
         }
         crate::log(format!("ring ({source})"));
-        if let Some(w) = &self.webhook {
+        for w in &self.webhooks {
             w.send("ring", "pressed", source);
         }
         if let Some(s) = &self.snapshots {
@@ -121,7 +128,7 @@ impl Events {
         let generation = m.generation.fetch_add(1, Ordering::SeqCst) + 1;
         if !m.state.swap(true, Ordering::SeqCst) {
             crate::log(format!("motion ({source})"));
-            if let Some(w) = &self.webhook {
+            for w in &self.webhooks {
                 w.send("motion", "start", source);
             }
             if let Some(s) = &self.snapshots {
@@ -135,14 +142,14 @@ impl Events {
     /// Off after `after` (default: the hold time), unless a later trigger came in meanwhile.
     fn motion_off_after(&self, generation: u64, after: Option<Duration>) {
         let Some(m) = &self.motion else { return };
-        let (state, gen_now, server, iid, webhook) = (m.state.clone(), m.generation.clone(), self.server.clone(), m.iid, self.webhook.clone());
+        let (state, gen_now, server, iid, webhook) = (m.state.clone(), m.generation.clone(), self.server.clone(), m.iid, self.webhooks.clone());
         let wait = after.unwrap_or(m.hold);
         std::thread::spawn(move || {
             std::thread::sleep(wait);
             if gen_now.load(Ordering::SeqCst) == generation && state.swap(false, Ordering::SeqCst) {
                 crate::log("motion cleared".into());
                 server.notify(iid, serde_json::json!(false));
-                if let Some(w) = webhook {
+                for w in webhook {
                     w.send("motion", "end", "hold");
                 }
             }
