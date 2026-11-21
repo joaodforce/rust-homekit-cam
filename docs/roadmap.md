@@ -57,6 +57,11 @@ Things that work but disappoint, learned the hard way. `probe` already prints th
 - Firewall: live view, talk-back and HKSV use ports picked per session; Protect talk-back needs
   UDP 7004 to the camera.
 - Protect API rate limiting (HTTP 429) and RTSP disabled per camera in Protect.
+- Cameras that reset quick back-to-back RTSP connections (seen: Intelbras VIP-1130-B-G4 dropped
+  the third connection `probe` opened within seconds; fine on retry): retry once before
+  reporting the stream as broken.
+- Intelbras sub streams default to ~1 Mbps (704x480): fine on the LAN, too big for remote
+  viewers; point at the camera's video settings page.
 
 ## Other ideas
 
