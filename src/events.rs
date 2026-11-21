@@ -22,6 +22,7 @@ pub struct Events {
     pub motion: Option<Motion>,
     last_ring: Mutex<Option<Instant>>,
     webhooks: Vec<Arc<Webhook>>,
+    webhook_snapshot: Option<WebhookSnapshot>,
 }
 
 /// Where state changes go: `{"camera": name, "event": "motion"|"ring", "state": …, "source": …}`.
@@ -33,14 +34,16 @@ pub struct Webhook {
 impl Webhook {
     /// POST in the background: a slow or absent receiver never holds up HomeKit.
     pub fn send(self: &Arc<Self>, event: &str, state: &str, source: &str) {
-        let (w, body) = (self.clone(), webhook_body(&self.camera, event, state, source));
-        std::thread::spawn(move || {
-            match crate::httpc::request("POST", &w.url, Some("application/json"), body.as_bytes(), Duration::from_secs(5)) {
-                Ok(r) if (200..300).contains(&r.status) => {}
-                Ok(r) => crate::log(format!("motion_webhook {}: HTTP {}", w.shown(), r.status)),
-                Err(e) => crate::log(format!("motion_webhook {}: {e}", w.shown())),
-            }
-        });
+        let (w, body) = (self.clone(), webhook_body(&self.camera, event, state, source, None));
+        std::thread::spawn(move || w.post(&body));
+    }
+
+    fn post(&self, body: &str) {
+        match crate::httpc::request("POST", &self.url, Some("application/json"), body.as_bytes(), Duration::from_secs(5)) {
+            Ok(r) if (200..300).contains(&r.status) => {}
+            Ok(r) => crate::log(format!("motion_webhook {}: HTTP {}", self.shown(), r.status)),
+            Err(e) => crate::log(format!("motion_webhook {}: {e}", self.shown())),
+        }
     }
 }
 
@@ -51,8 +54,31 @@ impl Webhook {
     }
 }
 
-fn webhook_body(camera: &str, event: &str, state: &str, source: &str) -> String {
-    serde_json::json!({ "camera": camera, "event": event, "state": state, "source": source }).to_string()
+fn webhook_body(camera: &str, event: &str, state: &str, source: &str, snapshot: Option<&str>) -> String {
+    let mut b = serde_json::json!({ "camera": camera, "event": event, "state": state, "source": source });
+    if let Some(s) = snapshot {
+        b["snapshot"] = s.into(); // base64 JPEG
+    }
+    b.to_string()
+}
+
+/// `motion_webhook_snapshot`: a small JPEG with each motion start.
+#[derive(Clone, Copy, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebhookSnapshot {
+    /// pixels, the height follows the aspect
+    #[serde(default = "thumb_width")]
+    pub width: u32,
+    /// JPEG quality 1–100
+    #[serde(default = "thumb_quality")]
+    pub quality: u8,
+}
+
+fn thumb_width() -> u32 {
+    320
+}
+fn thumb_quality() -> u8 {
+    60
 }
 
 /// The Motion Sensor's state: on with each trigger, off `hold` after the last one.
@@ -71,12 +97,38 @@ impl Motion {
 
 impl Events {
     pub fn new(server: Server, ring_iid: Option<u64>, snapshots: Option<Arc<crate::snapshot::Snapshots>>, motion: Option<Motion>) -> Self {
-        Events { server, ring_iid, snapshots, motion, last_ring: Mutex::new(None), webhooks: Vec::new() }
+        Events { server, ring_iid, snapshots, motion, last_ring: Mutex::new(None), webhooks: Vec::new(), webhook_snapshot: None }
     }
 
-    pub fn with_webhooks(mut self, w: Vec<Webhook>) -> Self {
+    pub fn with_webhooks(mut self, w: Vec<Webhook>, snapshot: Option<WebhookSnapshot>) -> Self {
         self.webhooks = w.into_iter().map(Arc::new).collect();
+        self.webhook_snapshot = snapshot;
         self
+    }
+
+    /// Motion start to the webhooks, with a fresh small snapshot when configured (fetched once,
+    /// in the background, then sent to each).
+    fn webhooks_motion_start(&self, source: &str) {
+        let (Some(cfg), Some(snaps)) = (self.webhook_snapshot, self.snapshots.clone()) else {
+            for w in &self.webhooks {
+                w.send("motion", "start", source);
+            }
+            return;
+        };
+        let (webhooks, source) = (self.webhooks.clone(), source.to_string());
+        std::thread::spawn(move || {
+            let thumb = snaps.get().and_then(|j| crate::snapshot::shrink_jpeg(&j, cfg.width, cfg.quality));
+            let b64 = match thumb {
+                Ok(t) => Some(crate::tlv::b64(&t)),
+                Err(e) => {
+                    crate::log(format!("motion_webhook: no snapshot ({e}), sending the event without one"));
+                    None
+                }
+            };
+            for w in &webhooks {
+                w.post(&webhook_body(&w.camera, "motion", "start", &source, b64.as_deref()));
+            }
+        });
     }
 
     /// A doorbell press. Repeats within 3 s (two sources, double presses) count once.
@@ -128,12 +180,10 @@ impl Events {
         let generation = m.generation.fetch_add(1, Ordering::SeqCst) + 1;
         if !m.state.swap(true, Ordering::SeqCst) {
             crate::log(format!("motion ({source})"));
-            for w in &self.webhooks {
-                w.send("motion", "start", source);
-            }
             if let Some(s) = &self.snapshots {
-                s.invalidate();
+                s.invalidate(); // the next picture (notifications, the webhook's) is from now
             }
+            self.webhooks_motion_start(source);
             self.server.notify(m.iid, serde_json::json!(true));
         }
         Some(generation)
@@ -221,8 +271,10 @@ mod tests {
 
     #[test]
     fn webhook_body_shape() {
-        let b: serde_json::Value = serde_json::from_str(&webhook_body("Garagem", "motion", "start", "onvif")).unwrap();
+        let b: serde_json::Value = serde_json::from_str(&webhook_body("Garagem", "motion", "start", "onvif", None)).unwrap();
         assert_eq!(b, serde_json::json!({"camera": "Garagem", "event": "motion", "state": "start", "source": "onvif"}));
+        let b: serde_json::Value = serde_json::from_str(&webhook_body("Garagem", "motion", "start", "onvif", Some("/9j/"))).unwrap();
+        assert_eq!(b["snapshot"], "/9j/");
     }
 
     #[test]

@@ -165,16 +165,36 @@ pub fn ffmpeg_frame(bin: &str, url: &str, timeout: Duration) -> Result<Vec<u8>, 
 /// Returns (jpeg, source size, new size).
 #[allow(clippy::type_complexity)]
 pub fn resize_jpeg(jpeg: &[u8], w: u32, h: u32) -> Result<Option<(Vec<u8>, (u32, u32), (u32, u32))>, String> {
+    let Some((buf, src, dst)) = scale_jpeg(jpeg, 80, |sw, sh| {
+        let k = (w as f64 / sw as f64).min(h as f64 / sh as f64);
+        (k <= 0.5).then_some(k)
+    })?
+    else {
+        return Ok(None);
+    };
+    if buf.len() * 10 > jpeg.len() * 7 {
+        return Ok(None); // under 30% saved: not worth a different image
+    }
+    Ok(Some((buf, src, dst)))
+}
+
+/// A JPEG at most `width` wide (aspect kept) at `quality` (1–100): the source when it is
+/// already that small. For thumbnails sent with motion events.
+pub fn shrink_jpeg(jpeg: &[u8], width: u32, quality: u8) -> Result<Vec<u8>, String> {
+    let r = scale_jpeg(jpeg, quality.clamp(1, 100), |sw, _| (sw > width).then(|| width as f64 / sw as f64))?;
+    Ok(r.map(|(buf, _, _)| buf).unwrap_or_else(|| jpeg.to_vec()))
+}
+
+/// Decode at the smallest 1/2, 1/4, 1/8 scale still at least the target, area-average to the
+/// target and re-encode. `factor(source w, h)` gives the scale, or None to leave it alone.
+#[allow(clippy::type_complexity)]
+fn scale_jpeg(jpeg: &[u8], quality: u8, factor: impl Fn(u32, u32) -> Option<f64>) -> Result<Option<(Vec<u8>, (u32, u32), (u32, u32))>, String> {
     let mut d = jpeg_decoder::Decoder::new(jpeg);
     d.read_info().map_err(|e| e.to_string())?;
     let info = d.info().ok_or("no image info")?;
     let (sw, sh) = (info.width as u32, info.height as u32);
-    let k = (w as f64 / sw as f64).min(h as f64 / sh as f64);
-    if k > 0.5 {
-        return Ok(None);
-    }
+    let Some(k) = factor(sw, sh) else { return Ok(None) };
     let (tw, th) = (((sw as f64 * k).round() as u32).max(1), ((sh as f64 * k).round() as u32).max(1));
-    // decode at the smallest 1/2, 1/4, 1/8 scale still at least the target size
     let (dw, dh) = d.scale(tw as u16, th as u16).map_err(|e| e.to_string())?;
     let px = d.decode().map_err(|e| e.to_string())?;
     let (c, color) = match d.info().map(|i| i.pixel_format) {
@@ -184,10 +204,7 @@ pub fn resize_jpeg(jpeg: &[u8], w: u32, h: u32) -> Result<Option<(Vec<u8>, (u32,
     };
     let out = area_resample(&px, dw as usize, dh as usize, c, tw as usize, th as usize);
     let mut buf = Vec::with_capacity(out.len() / 8);
-    jpeg_encoder::Encoder::new(&mut buf, 80).encode(&out, tw as u16, th as u16, color).map_err(|e| e.to_string())?;
-    if buf.len() * 10 > jpeg.len() * 7 {
-        return Ok(None); // under 30% saved: not worth a different image
-    }
+    jpeg_encoder::Encoder::new(&mut buf, quality).encode(&out, tw as u16, th as u16, color).map_err(|e| e.to_string())?;
     Ok(Some((buf, (sw, sh), (tw, th))))
 }
 
@@ -255,5 +272,19 @@ mod tests {
         assert!(resize_jpeg(&test_jpeg(640, 360), 480, 640).unwrap().is_none());
         assert!(resize_jpeg(&img, 320, 240).unwrap().is_some());
         assert!(resize_jpeg(b"not a jpeg", 320, 240).is_err());
+    }
+
+    #[test]
+    fn thumbnails_for_motion_events() {
+        let big = test_jpeg(1280, 960);
+        let t = shrink_jpeg(&big, 320, 60).unwrap();
+        let mut d = jpeg_decoder::Decoder::new(&t[..]);
+        d.read_info().unwrap();
+        let i = d.info().unwrap();
+        assert_eq!((i.width, i.height), (320, 240));
+        assert!(t.len() < 20_000, "{}", t.len());
+        // already small: sent as is
+        let small = test_jpeg(300, 200);
+        assert_eq!(shrink_jpeg(&small, 320, 60).unwrap(), small);
     }
 }

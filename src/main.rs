@@ -99,6 +99,8 @@ struct Config {
     /// `{"camera", "event": "motion"|"ring", "state": "start"|"end"|"pressed", "source"}`
     #[serde(default)]
     motion_webhook: OneOrMore,
+    /// Send a small JPEG (base64, `"snapshot"`) with each motion start: `{ width = 320, quality = 60 }`
+    motion_webhook_snapshot: Option<events::WebhookSnapshot>,
     /// A JPEG snapshot URL (http://[user:pass@]host/path); default with [protect]: Protect's.
     snapshot_url: Option<String>,
     /// Grab snapshots from the RTSP stream (sub stream first) with this ffmpeg ("ffmpeg" =
@@ -279,7 +281,7 @@ fn main() {
                 }
                 log(format!("events: motion and rings also go to {}", w.shown()));
             }
-            let ev = Arc::new(events::Events::new(server.clone(), cfg.doorbell.then_some(camera::SWITCH_EVENT), snapshots.clone(), motion).with_webhooks(webhooks));
+            let ev = Arc::new(events::Events::new(server.clone(), cfg.doorbell.then_some(camera::SWITCH_EVENT), snapshots.clone(), motion).with_webhooks(webhooks, cfg.motion_webhook_snapshot));
             if let (Some(p), Some(pc)) = (&protect, &cfg.protect) {
                 follow_protect(p.clone(), pc.motion, ev.clone());
             }
