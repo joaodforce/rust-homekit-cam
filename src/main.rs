@@ -32,7 +32,7 @@ pub fn log(msg: String) {
 
 /// An ONVIF camera: where to find it and how to log in. It can supply the RTSP URLs (when
 /// [rtsp] is not set), the snapshot URL (when snapshot_url is not set) and motion/ring events.
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 struct OnvifCfg {
     /// http://<camera>[:port]
     url: String,
@@ -172,13 +172,13 @@ fn main() {
         }
         "probe" => {
             if let Some(oc) = &cfg.onvif {
-                connect_onvif(oc, &mut cfg.rtsp);
+                try_onvif(oc, &mut cfg.rtsp).unwrap_or_else(|e| die(e));
             }
             probe(&cfg.rtsp)
         }
         "audio-test" => {
             if let Some(oc) = &cfg.onvif {
-                connect_onvif(oc, &mut cfg.rtsp);
+                try_onvif(oc, &mut cfg.rtsp).unwrap_or_else(|e| die(e));
             }
             for (name, url) in [("medium", &cfg.rtsp.medium), ("low", &cfg.rtsp.low), ("high", &cfg.rtsp.high)] {
                 if let Some(u) = url {
@@ -197,7 +197,14 @@ fn main() {
         "record-test" => record_test(&cfg.rtsp, args.get(3).map(String::as_str).unwrap_or("record-test.mp4")),
         "reset" =>println!("removed {} pairing(s); restart the service", hap::reset(cfg.state_dir.clone().unwrap())),
         "serve" => {
-            let onvif = cfg.onvif.as_ref().map(|o| connect_onvif(o, &mut cfg.rtsp));
+            // With [rtsp] URLs, ONVIF is extra (events, maybe snapshots): one try now, and on failure
+            // keep serving and retry in the background. Without them it supplies the streams: wait.
+            let has_rtsp = cfg.rtsp.high.is_some() || cfg.rtsp.medium.is_some() || cfg.rtsp.low.is_some();
+            let onvif = match &cfg.onvif {
+                Some(oc) if has_rtsp => try_onvif(oc, &mut cfg.rtsp).map_err(|e| log(onvif_failure(&e, true))).ok(),
+                Some(oc) => Some(connect_onvif(oc, &mut cfg.rtsp)),
+                None => None,
+            };
             if cfg.protect.as_ref().is_some_and(|p| p.camera_id.is_empty()) {
                 die("[protect] camera_id is missing (rust-homekit-cam protect-cameras <config> lists them)".into());
             }
@@ -244,15 +251,23 @@ fn main() {
             if let (Some(p), Some(pc)) = (&protect, &cfg.protect) {
                 follow_protect(p.clone(), pc.motion, ev.clone());
             }
-            if let (Some((o, _)), Some(oc)) = (&onvif, &cfg.onvif) {
+            if let Some(oc) = &cfg.onvif {
                 let (motion_keys, ring_keys, ev) = (oc.motion_topics.clone(), oc.ring_topics.clone(), ev.clone());
-                o.clone().follow(move |topic, _name, value| {
+                let on_event = move |topic: &str, _name: &str, value: &str| {
                     if onvif::motion_value(topic, value, &ring_keys) == Some(true) {
                         ev.ring("onvif");
                     } else if let Some(on) = onvif::motion_value(topic, value, &motion_keys) {
                         if on { ev.motion_start("onvif") } else { ev.motion_end("onvif") }
                     }
-                });
+                };
+                match &onvif {
+                    Some((o, _)) => o.clone().follow(on_event),
+                    None => {
+                        // the first try failed: keep retrying (gently, see onvif_failure) for events
+                        let (oc, mut ch) = (oc.clone(), cfg.rtsp.clone());
+                        std::thread::spawn(move || connect_onvif(&oc, &mut ch).0.follow(on_event));
+                    }
+                }
             }
             if let Some(listen) = &cfg.ring_listen {
                 if cfg.ring_token.is_empty() {
@@ -299,17 +314,43 @@ fn follow_protect(p: Arc<protect::Protect>, kind: protect::MotionKind, ev: Arc<e
 
 /// Log in to the ONVIF camera (retrying until it answers), fill in [rtsp] from its H.264
 /// profiles when not set, and find its snapshot URL.
+/// A rejected login (wrong password, or an ONVIF user apart from the web login): retrying fast
+/// would lock the account (Intelbras: 30 attempts), so these wait much longer.
+fn onvif_auth_error(e: &str) -> bool {
+    let l = e.to_ascii_lowercase();
+    ["not authorized", "notauthorized", "http 401", "invalid username or password", "unauthorized"].iter().any(|k| l.contains(k))
+}
+
+/// The log line for a failed ONVIF connection, and how long to wait before the next try.
+fn onvif_failure(e: &str, background: bool) -> String {
+    let wait = if onvif_auth_error(e) { 600 } else { 10 };
+    let hint = if onvif_auth_error(e) {
+        ": the camera rejected the ONVIF login (check user/password; some cameras keep ONVIF users apart from the web login); retrying slowly so the account isn't locked"
+    } else {
+        ""
+    };
+    let mode = if background { ", serving the [rtsp] streams meanwhile" } else { "" };
+    format!("onvif: {e}{hint}{mode} (next try in {wait} s)")
+}
+
+/// Connect, retrying for ever (slowly after a rejected login).
 fn connect_onvif(oc: &OnvifCfg, rtsp: &mut stream::Channels) -> (Arc<onvif::Onvif>, Option<String>) {
-    let o = loop {
-        match onvif::Onvif::connect(&oc.url, &oc.user, &oc.password) {
-            Ok(o) => break o,
+    loop {
+        match try_onvif(oc, rtsp) {
+            Ok(r) => return r,
             Err(e) => {
-                log(format!("onvif: {e} (retrying in 10 s)"));
-                std::thread::sleep(std::time::Duration::from_secs(10));
+                log(onvif_failure(&e, false));
+                std::thread::sleep(std::time::Duration::from_secs(if onvif_auth_error(&e) { 600 } else { 10 }));
             }
         }
-    };
-    let mut profiles: Vec<onvif::Profile> = o.profiles().unwrap_or_else(|e| die(e)).into_iter().filter(|p| p.encoding.eq_ignore_ascii_case("H264")).collect();
+    }
+}
+
+/// One connection attempt: the camera's services and profiles; streams into `rtsp` when it has
+/// none; the snapshot URL (when `snapshot` is on).
+fn try_onvif(oc: &OnvifCfg, rtsp: &mut stream::Channels) -> Result<(Arc<onvif::Onvif>, Option<String>), String> {
+    let o = onvif::Onvif::connect(&oc.url, &oc.user, &oc.password)?;
+    let mut profiles: Vec<onvif::Profile> = o.profiles()?.into_iter().filter(|p| p.encoding.eq_ignore_ascii_case("H264")).collect();
     profiles.sort_by_key(|p| std::cmp::Reverse(p.width * p.height));
     if rtsp.high.is_none() && rtsp.medium.is_none() && rtsp.low.is_none() {
         if profiles.is_empty() {
@@ -328,7 +369,7 @@ fn connect_onvif(oc: &OnvifCfg, rtsp: &mut stream::Channels) -> (Arc<onvif::Onvi
     } else {
         None
     };
-    (Arc::new(o), snapshot)
+    Ok((Arc::new(o), snapshot))
 }
 
 /// Stream snapshots through ffmpeg: the smallest stream decodes fastest.
@@ -345,7 +386,7 @@ fn snapshot_test(cfg: &Config, out: &str) {
     } else if cfg.snapshot_ffmpeg.is_some() {
         let mut ch = cfg.rtsp.clone();
         if let Some(oc) = &cfg.onvif {
-            connect_onvif(oc, &mut ch);
+            try_onvif(oc, &mut ch).unwrap_or_else(|e| die(e));
         }
         ffmpeg_source(cfg.snapshot_ffmpeg.as_deref(), &ch)
     } else if let Some(p) = &cfg.protect {
@@ -353,7 +394,7 @@ fn snapshot_test(cfg: &Config, out: &str) {
         snapshot::Source::Protect(Arc::new(protect::Protect::new(&host, &p.token, &p.camera_id, p.cert_sha256.as_deref()).unwrap_or_else(|e| die(e))))
     } else if let Some(oc) = &cfg.onvif {
         let mut ch = cfg.rtsp.clone();
-        match connect_onvif(oc, &mut ch).1 {
+        match try_onvif(oc, &mut ch).unwrap_or_else(|e| die(e)).1 {
             Some(u) => snapshot::Source::Url(u),
             None => die("the camera has no ONVIF snapshot URI: set snapshot_url".into()),
         }
@@ -579,6 +620,16 @@ mod tests {
 
     fn p(name: &'static str, kbps: usize, slices: u32, audio: &[&str]) -> Probed {
         Probed { name, kbps, slices, audio: audio.iter().map(|s| s.to_string()).collect() }
+    }
+
+    #[test]
+    fn onvif_login_failures_retry_slowly() {
+        let intelbras = "ONVIF: HTTP 400 Sender not Authorized. Invalid username or password! You still have 29 attempt(s).";
+        assert!(onvif_auth_error(intelbras));
+        assert!(onvif_failure(intelbras, true).contains("next try in 600 s"));
+        assert!(onvif_auth_error("ONVIF fault: ter:NotAuthorized"));
+        assert!(!onvif_auth_error("192.168.10.40:80: Connection refused"));
+        assert!(onvif_failure("192.168.10.40:80: Connection refused", false).ends_with("(next try in 10 s)"));
     }
 
     #[test]
