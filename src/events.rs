@@ -10,8 +10,8 @@
 use crate::hap::Server;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex, Once};
 use std::time::{Duration, Instant};
 
 pub struct Events {
@@ -86,12 +86,47 @@ pub struct Motion {
     pub iid: u64,
     pub state: Arc<AtomicBool>,
     pub hold: Duration,
-    generation: Arc<AtomicU64>,
+    /// when the sensor goes off; one timer thread per camera waits for it (each trigger moves it)
+    timer: Arc<Deadline>,
+    started: Once,
+}
+
+/// A deadline one thread waits for: `set` moves it (the latest call wins), `run` calls `expired`
+/// each time it passes. Replaces a sleeping thread per trigger, which piled up on busy cameras
+/// (a motion start waits up to 10 minutes for its end).
+#[derive(Default)]
+pub struct Deadline {
+    at: Mutex<Option<Instant>>,
+    changed: Condvar,
+}
+
+impl Deadline {
+    pub fn set(&self, after: Duration) {
+        *self.at.lock().unwrap() = Some(Instant::now() + after);
+        self.changed.notify_one();
+    }
+
+    /// Wait for deadlines for ever, calling `expired` as each one passes.
+    pub fn run(&self, expired: impl Fn()) {
+        let mut at = self.at.lock().unwrap();
+        loop {
+            match *at {
+                None => at = self.changed.wait(at).unwrap(),
+                Some(t) if Instant::now() >= t => {
+                    *at = None;
+                    drop(at);
+                    expired();
+                    at = self.at.lock().unwrap();
+                }
+                Some(t) => at = self.changed.wait_timeout(at, t - Instant::now()).unwrap().0,
+            }
+        }
+    }
 }
 
 impl Motion {
     pub fn new(iid: u64, state: Arc<AtomicBool>, hold: Duration) -> Self {
-        Motion { iid, state, hold, generation: Arc::new(AtomicU64::new(0)) }
+        Motion { iid, state, hold, timer: Arc::new(Deadline::default()), started: Once::new() }
     }
 }
 
@@ -153,15 +188,15 @@ impl Events {
 
     /// Motion seen (again): the sensor turns on, and off `hold` after the last trigger.
     pub fn motion(&self, source: &str) {
-        if let Some(g) = self.motion_on(source) {
-            self.motion_off_after(g, None);
+        if self.motion_on(source) {
+            self.motion_off_after(None);
         }
     }
 
     /// Motion started and lasts until `motion_end` (at most 10 minutes, in case the end is lost).
     pub fn motion_start(&self, source: &str) {
-        if let Some(g) = self.motion_on(source) {
-            self.motion_off_after(g, Some(Duration::from_secs(600)));
+        if self.motion_on(source) {
+            self.motion_off_after(Some(Duration::from_secs(600)));
         }
     }
 
@@ -169,15 +204,13 @@ impl Events {
     pub fn motion_end(&self, _source: &str) {
         let Some(m) = &self.motion else { return };
         if m.state.load(Ordering::SeqCst) {
-            let g = m.generation.fetch_add(1, Ordering::SeqCst) + 1;
-            self.motion_off_after(g, None);
+            self.motion_off_after(None);
         }
     }
 
-    /// Sensor on (notifying on the change); returns the trigger's generation.
-    fn motion_on(&self, source: &str) -> Option<u64> {
-        let m = self.motion.as_ref()?;
-        let generation = m.generation.fetch_add(1, Ordering::SeqCst) + 1;
+    /// Sensor on (notifying on the change); false without a Motion Sensor.
+    fn motion_on(&self, source: &str) -> bool {
+        let Some(m) = self.motion.as_ref() else { return false };
         if !m.state.swap(true, Ordering::SeqCst) {
             crate::log(format!("motion ({source})"));
             if let Some(s) = &self.snapshots {
@@ -186,24 +219,27 @@ impl Events {
             self.webhooks_motion_start(source);
             self.server.notify(m.iid, serde_json::json!(true));
         }
-        Some(generation)
+        true
     }
 
-    /// Off after `after` (default: the hold time), unless a later trigger came in meanwhile.
-    fn motion_off_after(&self, generation: u64, after: Option<Duration>) {
+    /// Off after `after` (default: the hold time), unless a later trigger moves it again.
+    fn motion_off_after(&self, after: Option<Duration>) {
         let Some(m) = &self.motion else { return };
-        let (state, gen_now, server, iid, webhook) = (m.state.clone(), m.generation.clone(), self.server.clone(), m.iid, self.webhooks.clone());
-        let wait = after.unwrap_or(m.hold);
-        std::thread::spawn(move || {
-            std::thread::sleep(wait);
-            if gen_now.load(Ordering::SeqCst) == generation && state.swap(false, Ordering::SeqCst) {
-                crate::log("motion cleared".into());
-                server.notify(iid, serde_json::json!(false));
-                for w in webhook {
-                    w.send("motion", "end", "hold");
-                }
-            }
+        m.started.call_once(|| {
+            let (timer, state, server, iid, webhooks) = (m.timer.clone(), m.state.clone(), self.server.clone(), m.iid, self.webhooks.clone());
+            std::thread::spawn(move || {
+                timer.run(|| {
+                    if state.swap(false, Ordering::SeqCst) {
+                        crate::log("motion cleared".into());
+                        server.notify(iid, serde_json::json!(false));
+                        for w in &webhooks {
+                            w.send("motion", "end", "hold");
+                        }
+                    }
+                })
+            });
         });
+        m.timer.set(after.unwrap_or(m.hold));
     }
 }
 
@@ -291,5 +327,26 @@ mod tests {
         assert!(text.contains("Content-Type: application/json"));
         assert!(text.ends_with(r#"{"camera":"Garagem","event":"motion","source":"hold","state":"end"}"#), "{text}");
         s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n").unwrap();
+    }
+
+    #[test]
+    fn deadline_latest_set_wins_and_one_thread_serves_all() {
+        let d = Arc::new(Deadline::default());
+        let fired = Arc::new(Mutex::new(Vec::<Instant>::new()));
+        let (d2, f2) = (d.clone(), fired.clone());
+        std::thread::spawn(move || d2.run(|| f2.lock().unwrap().push(Instant::now())));
+        let t0 = Instant::now();
+        d.set(Duration::from_secs(600)); // a start: off in 10 min unless something else comes
+        d.set(Duration::from_millis(80)); // an end: off after the hold instead
+        std::thread::sleep(Duration::from_millis(40));
+        d.set(Duration::from_millis(80)); // motion again: pushed back
+        std::thread::sleep(Duration::from_millis(250));
+        let f = fired.lock().unwrap().clone();
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert!(f[0] - t0 >= Duration::from_millis(115), "fired after {:?}", f[0] - t0);
+        drop(f);
+        d.set(Duration::from_millis(10)); // and it keeps serving later events
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(fired.lock().unwrap().len(), 2);
     }
 }
