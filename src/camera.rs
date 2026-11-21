@@ -413,8 +413,8 @@ impl Accessory for Camera {
         }
     }
 
-    fn snapshot(&self, _w: u32, _h: u32) -> Result<Arc<Vec<u8>>, String> {
-        self.snapshots.as_ref().ok_or("no snapshot source configured")?.get()
+    fn snapshot(&self, w: u32, h: u32) -> Result<Arc<Vec<u8>>, String> {
+        self.snapshots.as_ref().ok_or("no snapshot source configured")?.get_sized(w, h)
     }
 
     fn closed(&self, conn: Conn) {

@@ -20,6 +20,7 @@ starting point.
 | `ring_token` | required with `ring_listen` | Bearer token for those requests |
 | `snapshot_url` | from `[protect]` or `[onvif]` | `http://[user:pass@]host/path` returning a JPEG (Basic or Digest); overrides the backends |
 | `snapshot_ffmpeg` | unset | Grab snapshots from the RTSP stream with ffmpeg (which you install): `"ffmpeg"` from PATH, or its full path. Used when `snapshot_url` isn't set; overrides the backends. See [generic-cameras.md](generic-cameras.md#snapshots-from-the-stream-ffmpeg) |
+| `snapshot_resize` | `false` | Shrink snapshots when the Home app asks for a much smaller image (the Apple Watch asks for ~320x240, through a home hub): decoded at 1/2–1/8 scale and re-encoded, a few ms each, a few KB instead of a few hundred. Only when the request is at most half the source's size; otherwise the original is sent. Works with every snapshot source |
 | `transcode_audio` | `false` | Convert camera audio to what HomeKit takes (video is never touched): G.711/AAC → Opus for live view, G.711/Opus → AAC for recordings. Needed for sound from most non-Protect cameras. See [generic-cameras.md](generic-cameras.md#no-audio-in-live-view-or-recordings) |
 
 `state_dir` defaults to systemd's `$STATE_DIRECTORY` (`/var/lib/rust-homekit-cam/<name>`) when

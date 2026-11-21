@@ -22,6 +22,8 @@ ring_token = "change-me"
 # snapshot_url = "http://user:password@192.0.2.10/cgi-bin/snapshot.cgi"
 # No snapshot URL at all? Grab a frame from the stream with ffmpeg (you install it):
 # snapshot_ffmpeg = "ffmpeg"     # or "/usr/bin/ffmpeg"
+# Shrink snapshots for small requests (Apple Watch tiles, ~320x240): a few ms each.
+# snapshot_resize = true
 
 # No camera audio in live view or recordings? Live view plays Opus, recordings take AAC; most
 # cameras send G.711 or AAC. This converts the audio (never the video), in-process.

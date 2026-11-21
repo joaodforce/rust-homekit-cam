@@ -45,6 +45,15 @@ Things that work but disappoint, learned the hard way. `probe` already prints th
 - AAC encoding for recordings costs ~2% of an M-series core, ~10% of a Pi 4 core, per camera,
   while recording is enabled: show the cost, prefer AAC from the camera.
 
+**Apple Watch**
+- Streams come through the iPhone (nearby) or a home hub and ask for 320x240 at ≤ 68 kbps: any
+  `low` stream above that starts slowly or gives up (a 1 Mbps Intelbras sub stream: 5–7 s, then
+  ends). Warn when `low` is far above 68 kbps.
+- Snapshots are asked at ~320x240 and less often than on iPhone/Mac; `snapshot_resize` cuts them
+  from ~100–400 KB to ~7 KB (18 ms on CT 127). Suggest turning it on.
+- The Watch only contacts some cameras (seen: 4 of 6 on one visit; the others got no request at
+  all), so "doesn't load on the Watch" can be watchOS, not us: check the log for a request.
+
 **Events and recording**
 - No motion source (`[protect]`, `[onvif]` or `ring_listen`): the Motion Sensor never fires,
   so HKSV never records (logged at start-up).

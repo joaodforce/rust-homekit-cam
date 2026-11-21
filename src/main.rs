@@ -99,6 +99,10 @@ struct Config {
     /// Grab snapshots from the RTSP stream (sub stream first) with this ffmpeg ("ffmpeg" =
     /// from PATH). Used when there is no snapshot_url; wins over the [protect]/[onvif] snapshots.
     snapshot_ffmpeg: Option<String>,
+    /// Shrink snapshots when the controller asks for a much smaller image (Apple Watch: ~320x240
+    /// through a home hub). Decoded at reduced scale and re-encoded: a few ms per snapshot.
+    #[serde(default)]
+    snapshot_resize: bool,
     /// Camera audio → what HomeKit takes: G.711/AAC-LC → Opus for live view, G.711/Opus → AAC-LC
     /// for recordings. Off by default: without it those get video only. Video is never transcoded.
     #[serde(default)]
@@ -214,7 +218,7 @@ fn main() {
                 (None, None, Some(u)) => Some(snapshot::Source::Url(u)),
                 _ => None,
             }
-            .map(|s| Arc::new(snapshot::Snapshots::new(s)));
+            .map(|s| Arc::new(snapshot::Snapshots::new(s).with_resize(cfg.snapshot_resize)));
             if snapshots.is_none() {
                 log("no snapshot source (snapshot_url, snapshot_ffmpeg, [protect] or [onvif]): blank tiles".into());
             }
