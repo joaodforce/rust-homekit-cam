@@ -17,6 +17,7 @@ md-5 = "0.10"
 mdns-sd = "0.22.0"
 num-bigint = "0.4"
 opus = "0.4"
+oxideav-aac = "0.1.7"
 rand_core = { version = "0.6", features = ["getrandom"] }
 roxmltree = "0.20"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
@@ -32,6 +33,12 @@ x25519-dalek = "2"
 # libopus NEON intrinsics fail to build for armv7 with zig; plain C is plenty for 16 kHz speech
 [target.'cfg(target_arch = "arm")'.dependencies]
 opusic-sys = { version = "0.7", features = ["no-simd"] }
+
+# oxideav-aac 0.1.7 + two encoder speed fixes (FFT-based MDCT, allocation-free bit counting):
+# ~8x faster AAC encoding for recordings. Branch rust-homekit-cam-speed of our fork; drop this
+# once upstream has them.
+[patch.crates-io]
+oxideav-aac = { git = "https://github.com/joaodforce/oxideav-aac", rev = "197da336bdb3b11e582277692c7a05b322dd8914" }
 
 [profile.release]
 opt-level = "s"

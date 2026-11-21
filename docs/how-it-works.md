@@ -57,6 +57,11 @@ With `transcode_audio = true` a G.711 (PCMU/PCMA) or AAC-LC track is converted i
 rate and encoded with libopus (VoIP mode, 24 kbps) in frames of the requested packet time. The
 RTP timestamps count samples at the requested rate. Off by default.
 
+Recordings need AAC. A camera's AAC track is copied; with `transcode_audio = true` a G.711 or
+Opus track is decoded (Opus with libopus), resampled to 16 kHz and encoded to AAC-LC mono at
+32 kbps with oxideav-aac (pure Rust; built from [a fork](https://github.com/joaodforce/oxideav-aac/tree/rust-homekit-cam-speed)
+with an FFT-based MDCT and allocation-free bit counting, ~8× faster).
+
 Timestamps: Opus over RTP normally runs on a 48 kHz clock (RFC 7587), but HomeKit times it by
 the sample rate it requested (RFC 3550 style): at 16 kHz a 20 ms packet is 320 ticks, not 960.
 Passing 48 kHz timestamps through makes every packet look three times as long, and LAN audio

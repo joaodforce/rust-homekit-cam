@@ -7,10 +7,10 @@ doorbell = true                  # false: a plain camera
 # model = "Doorbell 2000"
 hap_port = 51830                 # different for each camera on the same host
 
-# Motion Sensor (the trigger for HomeKit Secure Video): default on with [protect];
-# set motion = true to feed it with POST /motion. Off motion_hold seconds after the last trigger.
-# motion = true
+# The Motion Sensor (the trigger for HomeKit Secure Video) is always there, fed by [protect],
+# [onvif] events or POST /motion. Off motion_hold seconds after the last trigger.
 # motion_hold = 10
+# hksv = false                   # no HomeKit Secure Video (recording) services
 
 # Rings and motion arrive as POST /ring, POST /motion with "Authorization: Bearer <ring_token>" (from HA, a webhook…).
 # Optional; a different port for each camera on the same host.
@@ -23,8 +23,9 @@ ring_token = "change-me"
 # No snapshot URL at all? Grab a frame from the stream with ffmpeg (you install it):
 # snapshot_ffmpeg = "ffmpeg"     # or "/usr/bin/ffmpeg"
 
-# No camera audio in live view? HomeKit plays Opus; most cameras send G.711 or AAC. This
-# converts the audio (never the video) to Opus, in-process. See docs/generic-cameras.md.
+# No camera audio in live view or recordings? Live view plays Opus, recordings take AAC; most
+# cameras send G.711 or AAC. This converts the audio (never the video), in-process.
+# See docs/generic-cameras.md.
 # transcode_audio = true
 
 # The camera's H.264 RTSP streams: one URL is enough; with several, the one that fits the

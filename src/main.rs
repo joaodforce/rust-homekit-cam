@@ -84,10 +84,9 @@ struct Config {
     state_dir: Option<PathBuf>,
     /// Two-way audio; `false` turns it off (the Speaker stays, nothing is sent to the camera)
     talkback: Option<bool>,
-    /// HomeKit Secure Video: on by default with the Motion Sensor (its trigger)
+    /// HomeKit Secure Video (on by default). The Motion Sensor, its trigger, is always there; fed by
+    /// Protect, ONVIF events or `POST /motion`. (An old `motion = …` setting is ignored.)
     hksv: Option<bool>,
-    /// Motion Sensor: on by default when there is a Protect backend; `POST /motion` feeds it too.
-    motion: Option<bool>,
     /// seconds the sensor stays on after the last motion
     #[serde(default = "motion_hold")]
     motion_hold: u64,
@@ -100,8 +99,8 @@ struct Config {
     /// Grab snapshots from the RTSP stream (sub stream first) with this ffmpeg ("ffmpeg" =
     /// from PATH). Used when there is no snapshot_url; wins over the [protect]/[onvif] snapshots.
     snapshot_ffmpeg: Option<String>,
-    /// Camera audio that isn't Opus (G.711, AAC-LC) → Opus for live view. Off by default: without
-    /// it such cameras stream video only. Video is never transcoded.
+    /// Camera audio → what HomeKit takes: G.711/AAC-LC → Opus for live view, G.711/Opus → AAC-LC
+    /// for recordings. Off by default: without it those get video only. Video is never transcoded.
     #[serde(default)]
     transcode_audio: bool,
     /// Optional ONVIF backend
@@ -159,7 +158,7 @@ fn main() {
     }
     let (cmd, path) = match args.as_slice() {
         [_, c, p] | [_, c, p, _] => (c.as_str(), p.as_str()),
-        _ => die("usage: rust-homekit-cam serve|code|reset|probe|snapshot|record-test|protect-cameras|onvif-info <config.toml>, onvif-discover, or --version".into()),
+        _ => die("usage: rust-homekit-cam serve|code|reset|probe|audio-test|snapshot|record-test|protect-cameras|onvif-info <config.toml>, onvif-discover, or --version".into()),
     };
     let mut cfg = load(path);
     match cmd {
@@ -172,6 +171,21 @@ fn main() {
                 connect_onvif(oc, &mut cfg.rtsp);
             }
             probe(&cfg.rtsp)
+        }
+        "audio-test" => {
+            if let Some(oc) = &cfg.onvif {
+                connect_onvif(oc, &mut cfg.rtsp);
+            }
+            for (name, url) in [("medium", &cfg.rtsp.medium), ("low", &cfg.rtsp.low), ("high", &cfg.rtsp.high)] {
+                if let Some(u) = url {
+                    for (rate, ptime) in [(16000, 20), (24000, 60)] {
+                        match transcode::selftest(u, rate, ptime, 6) {
+                            Ok(s) => println!("{name} → Opus {rate} Hz {ptime} ms: {s}"),
+                            Err(e) => println!("{name} → Opus {rate} Hz {ptime} ms: error: {e}"),
+                        }
+                    }
+                }
+            }
         }
         "onvif-info" => onvif_info(&cfg),
         "snapshot" => snapshot_test(&cfg, args.get(3).map(String::as_str).unwrap_or("snapshot.jpg")),
@@ -204,11 +218,14 @@ fn main() {
             if snapshots.is_none() {
                 log("no snapshot source (snapshot_url, snapshot_ffmpeg, [protect] or [onvif]): blank tiles".into());
             }
-            let motion_state = cfg.motion.unwrap_or(protect.is_some() || onvif.is_some()).then(|| Arc::new(std::sync::atomic::AtomicBool::new(false)));
-            let hksv = (cfg.hksv.unwrap_or(motion_state.is_some()) && motion_state.is_some())
+            let motion_state = Some(Arc::new(std::sync::atomic::AtomicBool::new(false)));
+            if protect.is_none() && onvif.is_none() && cfg.ring_listen.is_none() {
+                log("no motion source ([protect], [onvif] or ring_listen for POST /motion): the Motion Sensor never fires, so HKSV won't record".into());
+            }
+            let hksv = cfg.hksv.unwrap_or(true)
                 .then(|| cfg.rtsp.pick(2000).map(|(_, u)| u.to_string()))
                 .flatten()
-                .map(|url| hksv::Hksv::new(cfg.doorbell, cfg.state_dir.clone().unwrap(), url).unwrap_or_else(|e| die(e)));
+                .map(|url| hksv::Hksv::new(cfg.doorbell, cfg.state_dir.clone().unwrap(), url, cfg.transcode_audio).unwrap_or_else(|e| die(e)));
             let cam = Arc::new(
                 camera::Camera::new(&cfg.name, cfg.doorbell, cfg.rtsp.clone(), protect.clone().filter(|_| cfg.talkback.unwrap_or(true)))
                     .with_info(cfg.manufacturer.clone(), cfg.model.clone())
@@ -413,7 +430,7 @@ fn protect_cameras(cfg: &Config) {
 /// `record-test <config> <out.mp4>`: what HKSV would get: 4 s prebuffer + ~8 s live, as fMP4.
 fn record_test(ch: &stream::Channels, out: &str) {
     let url = ch.pick(2000).map(|(_, u)| u.to_string()).unwrap_or_else(|| die("no RTSP URL".into()));
-    let r = recording::Recorder::new(url);
+    let r = recording::Recorder::new(url, ch.transcode_audio);
     r.enabled.store(true, std::sync::atomic::Ordering::Relaxed);
     std::thread::sleep(std::time::Duration::from_secs(6));
     let (init, frags) = r.start().unwrap_or_else(|e| die(e));

@@ -1,3 +1,5 @@
 /target
 /dev/
 *.local.toml
+/stream.mp4
+/.test-stream/

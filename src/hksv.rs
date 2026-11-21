@@ -70,10 +70,10 @@ fn ch(iid: u64, ty: &str, format: &str, perms: &[&str], value: Value) -> Value {
 
 impl Hksv {
     /// `url`: the RTSP stream to record (the Medium channel by default).
-    pub fn new(doorbell: bool, state_dir: PathBuf, url: String) -> Result<Arc<Hksv>, String> {
+    pub fn new(doorbell: bool, state_dir: PathBuf, url: String, transcode: bool) -> Result<Arc<Hksv>, String> {
         let path = state_dir.join("hksv.json");
         let saved: Saved = std::fs::read(&path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
-        let recorder = Recorder::new(url);
+        let recorder = Recorder::new(url, transcode);
         let hds = hds::Server::start(Arc::new(Source(recorder.clone())))?;
         crate::log(format!("hksv: data stream on port {}", hds.port()));
         let h = Arc::new(Hksv { doorbell, path, saved: Mutex::new(saved), recorder, hds });

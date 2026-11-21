@@ -30,6 +30,8 @@ struct State {
 
 pub struct Recorder {
     url: String,
+    /// encode G.711/Opus camera audio to AAC (`transcode_audio`); AAC is always copied
+    transcode: bool,
     pub enabled: AtomicBool,
     pub audio_enabled: AtomicBool,
     pub prebuffer_ms: AtomicU32,
@@ -79,9 +81,10 @@ pub fn unhex(s: &str) -> Option<Vec<u8>> {
 }
 
 impl Recorder {
-    pub fn new(url: String) -> Arc<Recorder> {
+    pub fn new(url: String, transcode: bool) -> Arc<Recorder> {
         let r = Arc::new(Recorder {
             url,
+            transcode,
             enabled: AtomicBool::new(false),
             audio_enabled: AtomicBool::new(true),
             prebuffer_ms: AtomicU32::new(4000),
@@ -126,15 +129,41 @@ impl Recorder {
                 st.audio = asc.map(|asc| AudioInfo { asc, rate: a.clock, channels: a.channels as u16 });
             }
         }
-        if aac.is_some() {
-            c.setup(aac.unwrap(), 2)?;
+        // no AAC: encode the camera's G.711/Opus when asked to
+        let mut to_aac = None;
+        if let Some(a) = aac {
+            c.setup(a, 2)?;
+        } else if let Some(t) = tracks.iter().find(|t| crate::transcode::ToAac::wants(t)) {
+            if !self.transcode {
+                crate::log(format!("recording: camera audio is {}, recordings take AAC: set transcode_audio = true for sound", t.codec));
+            } else {
+                match crate::transcode::ToAac::new(t) {
+                    Ok(e) => {
+                        c.setup(t, 2)?;
+                        crate::log(format!("recording: encoding audio, {}", e.describe()));
+                        let asc = crate::transcode::TO_AAC_ASC.to_vec();
+                        self.state.lock().unwrap().audio = Some(AudioInfo { asc, rate: crate::transcode::TO_AAC_RATE, channels: 1 });
+                        to_aac = Some(e);
+                    }
+                    Err(e) => crate::log(format!("recording: audio encoder: {e}; video only")),
+                }
+            }
         }
+        let (mut aac_out, mut aac_n) = (Vec::new(), 0i64);
         c.play()?;
         let mut depack = Depacketizer::default();
         let (mut nals, mut au, mut au_key, mut au_ts) = (Vec::new(), Vec::<u8>::new(), false, 0i64);
         let (mut vts, mut ats) = (Unwrap::default(), Unwrap::default());
         while self.enabled.load(Ordering::Relaxed) {
             let (ch, data) = c.next()?;
+            if ch == 2 && data.len() > 12 && to_aac.is_some() {
+                to_aac.as_mut().unwrap().push(&data, &mut aac_out);
+                for f in aac_out.drain(..) {
+                    self.push(Media { video: false, ts: aac_n * 1024, data: f, key: true, arrival: Instant::now() });
+                    aac_n += 1;
+                }
+                continue;
+            }
             if ch == 2 && data.len() > 12 {
                 let ts = ats.push(u32::from_be_bytes(data[4..8].try_into().unwrap()));
                 for (i, f) in aac_frames(&data[12..]).into_iter().enumerate() {

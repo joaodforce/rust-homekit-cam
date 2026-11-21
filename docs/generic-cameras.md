@@ -7,8 +7,8 @@ Any camera (or NVR) with an **H.264** RTSP stream works. If it speaks ONVIF (mos
 |---|---|
 | H.264 video | live view, HomeKit Secure Video (with a motion source) |
 | an Opus audio track | camera audio in live view |
-| a G.711 (PCMU/PCMA) or AAC audio track | camera audio in live view with `transcode_audio = true` (see [below](#no-audio-in-live-view)) |
-| an AAC audio track | audio in recordings |
+| a G.711 (PCMU/PCMA) or AAC audio track | camera audio in live view with `transcode_audio = true` (see [below](#no-audio-in-live-view-or-recordings)) |
+| an AAC audio track | audio in recordings (G.711 or Opus: with `transcode_audio = true`) |
 | a JPEG snapshot URL, or ffmpeg installed | pictures in tiles and notifications |
 
 Two-way audio needs a vendor backend; only UniFi Protect has one so far (ONVIF back-channels
@@ -54,14 +54,15 @@ about a second or two depending on the camera's keyframe interval. Pictures are 
 and a ring or motion fetches a new one. Check it with `rust-homekit-cam snapshot <config>
 test.jpg`. A working `snapshot_url` is still faster and lighter.
 
-## No audio in live view
+## No audio in live view or recordings
 
-HomeKit's live view plays **Opus** (or AAC-ELD), while most cameras send **G.711** (PCMU/PCMA) or
-**AAC-LC**. By default audio is passed through untouched, so such a camera streams video only and
-the log says why when you open the live view:
+HomeKit's live view plays **Opus** (or AAC-ELD) and its recordings take **AAC**, while most
+cameras send **G.711** (PCMU/PCMA) or **AAC-LC**. By default audio is passed through untouched,
+so the log says when a camera's audio can't be used:
 
 ```
 stream: camera audio is pcma, HomeKit plays Opus: set transcode_audio = true for sound; video only
+recording: camera audio is pcma, recordings take AAC: set transcode_audio = true for sound
 ```
 
 Either switch the camera's audio codec to Opus (few offer it), or let rust-homekit-cam convert it:
@@ -70,23 +71,33 @@ Either switch the camera's audio codec to Opus (few offer it), or let rust-homek
 transcode_audio = true     # top level of the camera's config
 ```
 
-The audio (only the audio) is then decoded and re-encoded to Opus inside the binary: no ffmpeg,
-well under 1% of a CPU core per viewer. Check with
-`journalctl -u rust-homekit-cam@NAME | grep stream:` after opening the live view:
+The audio (only the audio) is then decoded and re-encoded inside the binary, no ffmpeg:
+
+| Camera audio | Live view | Recordings |
+|---|---|---|
+| Opus | passed through | → AAC-LC 16 kHz |
+| G.711 (PCMU/PCMA) | → Opus | → AAC-LC 16 kHz |
+| AAC-LC | → Opus | copied as is |
+
+Live view costs well under 1% of a CPU core per viewer. For recordings the AAC encoding runs
+while recording is enabled (the few seconds before a motion are kept ready): about 2% of a core
+on an Apple M-series, roughly 10% on a Raspberry Pi 4. A camera that sends AAC needs none of it
+for recordings. Check with `journalctl -u rust-homekit-cam@NAME | grep -E "stream:|recording:"`:
 
 ```
+recording: encoding audio, PCMA 8000 Hz → AAC-LC 16000 Hz
 stream: transcoding audio, PCMA 8000 Hz → Opus 16000 Hz, 20 ms
 stream: audio flowing, Opus config 9 stereo 0 (52 bytes)
 ```
 
 To see which audio codec a camera sends, `sudo rust-homekit-cam probe /etc/rust-homekit-cam/NAME.toml`
-lists the tracks (`pcmu`, `pcma`, `mpeg4-generic` = AAC, `opus`). Recordings (HKSV) keep the
-camera's AAC as is and don't need this.
+lists the tracks (`pcmu`, `pcma`, `mpeg4-generic` = AAC, `opus`). If the camera can send AAC,
+that's the cheapest choice: recordings copy it and live view converts it.
 
 ## Rings and motion from Home Assistant
 
-Without a vendor backend, events come in over HTTP. Set `ring_listen` and `ring_token` (and
-`motion = true` for the Motion Sensor), then call the endpoints from anything. In Home
+Without a vendor backend, events come in over HTTP. Set `ring_listen` and `ring_token` (they feed
+the doorbell and the Motion Sensor, which HomeKit Secure Video records on), then call the endpoints from anything. In Home
 Assistant (`configuration.yaml`):
 
 ```yaml

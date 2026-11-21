@@ -73,3 +73,21 @@ architecture (binary, unit file, example config, README, license) and `SHA256SUM
 | `deploy/rust-homekit-cam@.service` | systemd template unit, one instance per camera |
 
 The HAP and pairing code comes from the author's crtd project (a HomeKit TV accessory for an office CRT).
+
+## A fake camera for testing
+
+`scripts/test-stream.sh <variant>` runs an RTSP server (MediaMTX) and an ffmpeg publisher in
+Docker: `rtsp://127.0.0.1:8554/test` (1280x720) and `/test_low` (640x360), looping `./stream.mp4`
+(any clip you drop there; gitignored) or a test pattern. Variants pick the audio codec: `opus`,
+`opus-stereo`, `pcmu`, `pcma`, `aac8`, `aac16`, `aac44`, `aac48-stereo`, `g722`, `none`; `stop`
+removes the containers. `KBPS` / `LOW_KBPS` set the two bitrates, `SLICES=1` one slice per frame
+(ffmpeg's low-latency default cuts frames into several), `BEEP=1` a 1 s beep instead of the clip's
+audio. Point a dev config's `[rtsp]` at it, then:
+
+- `rust-homekit-cam audio-test <config>`: transcodes each stream's audio as a live view would
+  (Opus 16 kHz / 20 ms and 24 kHz / 60 ms), decodes it back and prints packet rate, timestamp
+  steps and level;
+- `rust-homekit-cam record-test <config> out.mp4`: what a recording would contain.
+
+Lessons it caught: HomeKit drops frames cut into many slices, and a home hub relaying a remote
+viewer asks for ≤132 kbps and loses most packets of a bigger `low` stream.

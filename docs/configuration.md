@@ -13,15 +13,14 @@ starting point.
 | `manufacturer`, `model` | `rust-homekit-cam`, `Video Doorbell` / `Camera` | Shown in the accessory details |
 | `hap_port` | `51830` | TCP port HomeKit talks to; **different for each camera** on one host |
 | `state_dir` | see below | Pairing identity, setup code, recording settings |
-| `motion` | on with `[protect]` or `[onvif]` | Adds the Motion Sensor (the trigger for HomeKit Secure Video); `true` to feed it with `POST /motion` |
 | `motion_hold` | `10` | Seconds the sensor stays on after the last motion |
-| `hksv` | on with the Motion Sensor | HomeKit Secure Video services; `false` hides them |
+| `hksv` | `true` | HomeKit Secure Video services; `false` hides them. The Motion Sensor (its trigger) is always present, fed by `[protect]`, `[onvif]` or `POST /motion` |
 | `talkback` | `true` | `false` turns two-way audio off (e.g. when the camera's speaker misbehaves) |
 | `ring_listen` | none | `"0.0.0.0:8780"`: listen for the event endpoints below; a different port per camera |
 | `ring_token` | required with `ring_listen` | Bearer token for those requests |
 | `snapshot_url` | from `[protect]` or `[onvif]` | `http://[user:pass@]host/path` returning a JPEG (Basic or Digest); overrides the backends |
 | `snapshot_ffmpeg` | unset | Grab snapshots from the RTSP stream with ffmpeg (which you install): `"ffmpeg"` from PATH, or its full path. Used when `snapshot_url` isn't set; overrides the backends. See [generic-cameras.md](generic-cameras.md#snapshots-from-the-stream-ffmpeg) |
-| `transcode_audio` | `false` | Convert the camera's G.711 or AAC audio to Opus for live view (video is never touched). Needed for sound from most non-Protect cameras. See [generic-cameras.md](generic-cameras.md#no-audio-in-live-view) |
+| `transcode_audio` | `false` | Convert camera audio to what HomeKit takes (video is never touched): G.711/AAC → Opus for live view, G.711/Opus → AAC for recordings. Needed for sound from most non-Protect cameras. See [generic-cameras.md](generic-cameras.md#no-audio-in-live-view-or-recordings) |
 
 `state_dir` defaults to systemd's `$STATE_DIRECTORY` (`/var/lib/rust-homekit-cam/<name>`) when
 run by the unit. Run from a shell (`code`, `reset`), it defaults to
@@ -40,7 +39,7 @@ special characters in the password (`@` → `%40`).
 
 Requirements: H.264 video. For camera audio in live view the stream needs an **Opus** track, or a
 G.711/AAC track with `transcode_audio = true`; for audio in recordings, an **AAC** track
-(`mpeg4-generic`). Otherwise you get video only.
+(`mpeg4-generic`), or a G.711/Opus track with `transcode_audio = true`. Otherwise you get video only.
 
 ## `[onvif]`: ONVIF backend (optional)
 
