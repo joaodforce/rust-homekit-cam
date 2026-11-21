@@ -85,6 +85,8 @@ pub struct Packetizer {
     pps: Option<Vec<u8>>,
     /// sent SPS/PPS since the last IDR
     params_sent: bool,
+    /// timestamp of the IDR picture we're in: its later slices get no SPS/PPS of their own
+    idr_ts: Option<u32>,
     started: bool,
     pub last_ts: u32,
 }
@@ -100,6 +102,7 @@ impl Packetizer {
             sps: None,
             pps: None,
             params_sent: false,
+            idr_ts: None,
             started: false,
             last_ts: 0,
         };
@@ -127,8 +130,8 @@ impl Packetizer {
         h
     }
 
-    /// Packets for one NAL. Waits for the first IDR; puts SPS/PPS in front of every IDR that
-    /// doesn't come with them.
+    /// Packets for one NAL. Waits for the first IDR; puts SPS/PPS in front of every IDR picture
+    /// that doesn't come with them (once: not between the slices of a multi-slice picture).
     pub fn push(&mut self, nal: &Nal, out: &mut Vec<Vec<u8>>) {
         let ty = nal.data.first().map(|b| b & 0x1f).unwrap_or(0);
         self.remember(&nal.data);
@@ -140,17 +143,25 @@ impl Packetizer {
                 self.params_sent = true;
             }
             5 => {
-                if !self.params_sent {
+                let new_picture = self.idr_ts != Some(nal.ts);
+                if new_picture && !self.started && !first_slice(&nal.data) {
+                    return; // joined in the middle of a picture: wait for the next one
+                }
+                if new_picture && !self.params_sent {
                     if let (Some(sps), Some(pps)) = (self.sps.clone(), self.pps.clone()) {
                         self.packetize(&sps, nal.ts, false, out);
                         self.packetize(&pps, nal.ts, false, out);
                     }
                 }
+                self.idr_ts = Some(nal.ts);
                 self.started = true;
-                self.params_sent = false;
+                if nal.last {
+                    self.params_sent = false;
+                }
             }
             1 => {
                 self.params_sent = false;
+                self.idr_ts = None;
                 if !self.started {
                     return;
                 }
@@ -184,6 +195,11 @@ impl Packetizer {
     }
 }
 
+/// A slice NAL whose first_mb_in_slice is 0 (Exp-Golomb "1": the top bit after the header).
+fn first_slice(nal: &[u8]) -> bool {
+    nal.get(1).is_some_and(|b| b & 0x80 != 0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -197,7 +213,7 @@ mod tests {
 
     #[test]
     fn fu_a_reassembly_and_refragmentation() {
-        let idr: Vec<u8> = std::iter::once(0x65).chain((0..3000).map(|i| i as u8)).collect();
+        let idr: Vec<u8> = [0x65, 0x88].into_iter().chain((0..3000).map(|i| i as u8)).collect();
         let mut d = Depacketizer::default();
         let mut nals = Vec::new();
         // incoming: FU-A in 1000-byte pieces
@@ -242,5 +258,26 @@ mod tests {
         let mut nals = Vec::new();
         d.push(&rtp(&[0x18, 0, 2, 0x67, 1, 0, 2, 0x68, 2], 5, false), &mut nals);
         assert_eq!(nals.iter().map(|n| n.data[0]).collect::<Vec<_>>(), [0x67, 0x68]);
+    }
+
+    #[test]
+    fn multi_slice_idr_gets_params_once() {
+        let mut p = Packetizer::new(99, 1, 1400, &[vec![0x67, 1, 2], vec![0x68, 3]], 0);
+        let mut out = Vec::new();
+        // a later slice first (joined mid-picture): skipped
+        p.push(&Nal { data: vec![0x65, 0x40, 9], ts: 0, last: false }, &mut out);
+        assert!(out.is_empty());
+        // an IDR picture in three slices (first_mb 0, then non-zero), then a P slice
+        for (i, d) in [vec![0x65, 0x88, 1], vec![0x65, 0x40, 2], vec![0x65, 0x20, 3]].into_iter().enumerate() {
+            p.push(&Nal { data: d, ts: 3000, last: i == 2 }, &mut out);
+        }
+        p.push(&Nal { data: vec![0x41, 0x88, 4], ts: 6000, last: true }, &mut out);
+        let types: Vec<u8> = out.iter().map(|o| o[12] & 0x1f).collect();
+        assert_eq!(types, vec![7, 8, 5, 5, 5, 1]);
+        // the next IDR gets them again
+        out.clear();
+        p.push(&Nal { data: vec![0x65, 0x88, 5], ts: 9000, last: true }, &mut out);
+        let types: Vec<u8> = out.iter().map(|o| o[12] & 0x1f).collect();
+        assert_eq!(types, vec![7, 8, 5]);
     }
 }
