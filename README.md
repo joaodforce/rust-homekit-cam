@@ -2,7 +2,7 @@
 
 Put an RTSP **doorbell or camera** in Apple Home as a native HomeKit accessory: ring
 notifications, live video and audio, two-way audio, snapshots, motion and **HomeKit Secure
-Video**. Video is **never transcoded**. Each camera runs as one small static binary (~2 MB):
+Video**. Video is **never transcoded** (camera audio can be, if you ask). Each camera runs as one small static binary (~3 MB):
 no Node, no ffmpeg, no Docker.
 
 It works with any camera that serves **H.264 over RTSP**. ONVIF cameras and UniFi Protect get
@@ -11,7 +11,7 @@ extras through optional backends:
 | Feature | Any H.264 RTSP camera | ONVIF | UniFi Protect |
 |---|---|---|---|
 | Live video (LAN and remote) | ✓ up to three streams, picked by bitrate | ✓ streams found automatically | ✓ High / Medium / Low |
-| Camera audio | ✓ if the stream has Opus | ✓ if the stream has Opus | ✓ |
+| Camera audio | ✓ Opus as is; G.711/AAC with `transcode_audio` | ✓ Opus as is; G.711/AAC with `transcode_audio` | ✓ |
 | Two-way audio | – | – (needs decoding) | ✓ |
 | Doorbell ring | ✓ `POST /ring` | ✓ + event topics | ✓ from Protect |
 | Motion sensor | ✓ `POST /motion` | ✓ camera's motion events | ✓ smart detections |

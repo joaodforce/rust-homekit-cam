@@ -23,6 +23,10 @@ ring_token = "change-me"
 # No snapshot URL at all? Grab a frame from the stream with ffmpeg (you install it):
 # snapshot_ffmpeg = "ffmpeg"     # or "/usr/bin/ffmpeg"
 
+# No camera audio in live view? HomeKit plays Opus; most cameras send G.711 or AAC. This
+# converts the audio (never the video) to Opus, in-process. See docs/generic-cameras.md.
+# transcode_audio = true
+
 # The camera's H.264 RTSP streams: one URL is enough; with several, the one that fits the
 # bitrate the iPhone asks for is used. Credentials go in the URL (Basic or Digest).
 [rtsp]

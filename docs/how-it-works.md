@@ -52,6 +52,11 @@ it, and it would need encoding); a camera's Opus track is passed through with a 
 iPhones on the LAN ask for 20 ms packets, home hubs relaying over the internet for 60 ms: then
 three 20 ms Opus frames go into one packet (code 3, RFC 6716), still the same audio data.
 
+With `transcode_audio = true` a G.711 (PCMU/PCMA) or AAC-LC track is converted instead: decoded
+(G.711 by table, AAC with Symphonia), downmixed to mono, linearly resampled to the controller's
+rate and encoded with libopus (VoIP mode, 24 kbps) in frames of the requested packet time. The
+RTP timestamps count samples at the requested rate. Off by default.
+
 Timestamps: Opus over RTP normally runs on a 48 kHz clock (RFC 7587), but HomeKit times it by
 the sample rate it requested (RFC 3550 style): at 16 kHz a 20 ms packet is 320 ticks, not 960.
 Passing 48 kHz timestamps through makes every packet look three times as long, and LAN audio

@@ -18,8 +18,8 @@ anywhere else.
 
 ## Building from source on Linux
 
-With [rustup](https://rustup.rs) (Rust 1.85 or newer, for edition 2024) and a C compiler
-(`apt install build-essential`):
+With [rustup](https://rustup.rs) (Rust 1.85 or newer, for edition 2024) a C compiler and CMake
+(`apt install build-essential cmake`; CMake builds the bundled libopus):
 
 ```bash
 git clone https://github.com/joaodforce/rust-homekit-cam && cd rust-homekit-cam
@@ -37,7 +37,7 @@ This build links against the system's glibc; the release binaries are static (mu
 
 For quick iterations on a test host. `make deploy HOST=root@<host>` builds a static x86_64 musl binary with
 [cargo-zigbuild](https://github.com/rust-cross/cargo-zigbuild) (`brew install zig
-cargo-zigbuild`, `rustup target add x86_64-unknown-linux-musl`), copies it and the systemd
+cargo-zigbuild cmake`, `rustup target add x86_64-unknown-linux-musl`), copies it and the systemd
 template unit over SSH and restarts every `rust-homekit-cam@*` instance. The Makefile puts
 rustup's toolchain ahead of Homebrew's Rust.
 

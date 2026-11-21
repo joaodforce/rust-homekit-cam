@@ -20,6 +20,7 @@ mod snapshot;
 mod srtp;
 mod stream;
 mod tlv;
+mod transcode;
 
 use serde::Deserialize;
 use std::path::PathBuf;
@@ -99,6 +100,10 @@ struct Config {
     /// Grab snapshots from the RTSP stream (sub stream first) with this ffmpeg ("ffmpeg" =
     /// from PATH). Used when there is no snapshot_url; wins over the [protect]/[onvif] snapshots.
     snapshot_ffmpeg: Option<String>,
+    /// Camera audio that isn't Opus (G.711, AAC-LC) → Opus for live view. Off by default: without
+    /// it such cameras stream video only. Video is never transcoded.
+    #[serde(default)]
+    transcode_audio: bool,
     /// Optional ONVIF backend
     onvif: Option<OnvifCfg>,
     /// Optional UniFi Protect backend (two-way audio, snapshots).
@@ -124,6 +129,7 @@ fn default_port() -> u16 {
 fn load(path: &str) -> Config {
     let text = std::fs::read_to_string(path).unwrap_or_else(|e| die(format!("{path}: {e}")));
     let mut cfg: Config = toml::from_str(&text).unwrap_or_else(|e| die(format!("{path}: {e}")));
+    cfg.rtsp.transcode_audio = cfg.transcode_audio;
     if cfg.state_dir.is_none() {
         let instance = std::path::Path::new(path).file_stem().and_then(|s| s.to_str()).unwrap_or("default").to_string();
         cfg.state_dir = Some(match std::env::var_os("STATE_DIRECTORY") {

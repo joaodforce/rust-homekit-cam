@@ -21,6 +21,7 @@ starting point.
 | `ring_token` | required with `ring_listen` | Bearer token for those requests |
 | `snapshot_url` | from `[protect]` or `[onvif]` | `http://[user:pass@]host/path` returning a JPEG (Basic or Digest); overrides the backends |
 | `snapshot_ffmpeg` | unset | Grab snapshots from the RTSP stream with ffmpeg (which you install): `"ffmpeg"` from PATH, or its full path. Used when `snapshot_url` isn't set; overrides the backends. See [generic-cameras.md](generic-cameras.md#snapshots-from-the-stream-ffmpeg) |
+| `transcode_audio` | `false` | Convert the camera's G.711 or AAC audio to Opus for live view (video is never touched). Needed for sound from most non-Protect cameras. See [generic-cameras.md](generic-cameras.md#no-audio-in-live-view) |
 
 `state_dir` defaults to systemd's `$STATE_DIRECTORY` (`/var/lib/rust-homekit-cam/<name>`) when
 run by the unit. Run from a shell (`code`, `reset`), it defaults to
@@ -37,8 +38,9 @@ directory: losing it means removing and re-adding the camera in the Home app.
 Credentials go in the URL: `rtsp://user:password@host:554/path` (Basic or Digest). Encode
 special characters in the password (`@` → `%40`).
 
-Requirements: H.264 video. For camera audio in live view the stream needs an **Opus** track; for
-audio in recordings, an **AAC** track (`mpeg4-generic`). Without them you get video only.
+Requirements: H.264 video. For camera audio in live view the stream needs an **Opus** track, or a
+G.711/AAC track with `transcode_audio = true`; for audio in recordings, an **AAC** track
+(`mpeg4-generic`). Otherwise you get video only.
 
 ## `[onvif]`: ONVIF backend (optional)
 

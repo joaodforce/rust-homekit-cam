@@ -23,6 +23,9 @@ pub struct Channels {
     /// allow High for big requests (10 Mbps on a Doorbell Lite)
     #[serde(default)]
     pub allow_high: bool,
+    /// non-Opus camera audio → Opus (the config's top-level `transcode_audio`)
+    #[serde(skip)]
+    pub transcode_audio: bool,
 }
 
 /// Requests at or below this (kbps) get the low channel first: a weak remote link.
@@ -51,7 +54,7 @@ pub struct Request {
     pub audio: Option<Audio>,
 }
 
-/// Camera audio for the controller (Opus, passed through).
+/// Camera audio for the controller (Opus: passed through, or transcoded to it).
 pub struct Audio {
     pub pt: u8,
     /// requested packet time, ms (informational: Protect's own framing is sent as is)
@@ -190,6 +193,28 @@ impl Rewriter {
     }
 }
 
+/// Camera audio on its way to the controller.
+enum AudioOut {
+    Pass(Rewriter),
+    Transcode(Box<crate::transcode::Transcoder>),
+}
+
+impl AudioOut {
+    fn rewrite(&mut self, pkt: &[u8], out: &mut Vec<Vec<u8>>) {
+        match self {
+            AudioOut::Pass(r) => r.rewrite(pkt, out),
+            AudioOut::Transcode(t) => t.push(pkt, out),
+        }
+    }
+
+    fn last_ts(&self) -> u32 {
+        match self {
+            AudioOut::Pass(r) => r.last_ts,
+            AudioOut::Transcode(t) => t.last_ts,
+        }
+    }
+}
+
 pub struct Handle {
     stop: Arc<AtomicBool>,
     rtsp: Arc<Mutex<Option<TcpStream>>>,
@@ -213,10 +238,11 @@ impl Drop for Handle {
 pub fn start(ep: Endpoint, req: Request, channels: &Channels, protect: Option<Arc<Protect>>) -> Result<Handle, String> {
     let (name, url) = channels.pick(req.kbps).ok_or("no RTSP URL configured")?;
     let url = url.to_string();
+    let transcode = channels.transcode_audio;
     let stop = Arc::new(AtomicBool::new(false));
     let rtsp_conn = Arc::new(Mutex::new(None));
     let h = Handle { stop: stop.clone(), rtsp: rtsp_conn.clone() };
-    crate::log(format!("stream: {} kbps requested → Protect channel {name}", req.kbps));
+    crate::log(format!("stream: {} kbps requested → channel {name}", req.kbps));
 
     // watchdog: the controller's RTCP keeps us going (and its reports are logged)
     let (sock, stop2, rtsp2) = (ep.video_sock.clone(), stop.clone(), rtsp_conn.clone());
@@ -247,7 +273,7 @@ pub fn start(ep: Endpoint, req: Request, channels: &Channels, protect: Option<Ar
     }
 
     std::thread::spawn(move || {
-        if let Err(e) = run(&ep, &req, &url, &stop, &rtsp_conn) {
+        if let Err(e) = run(&ep, &req, &url, transcode, &stop, &rtsp_conn) {
             if !stop.load(Ordering::Relaxed) {
                 crate::log(format!("stream: {e}"));
             }
@@ -349,22 +375,39 @@ impl RtcpStats {
     }
 }
 
-fn run(ep: &Endpoint, req: &Request, url: &str, stop: &AtomicBool, conn: &Mutex<Option<TcpStream>>) -> Result<(), String> {
+fn run(ep: &Endpoint, req: &Request, url: &str, transcode: bool, stop: &AtomicBool, conn: &Mutex<Option<TcpStream>>) -> Result<(), String> {
     let t0 = Instant::now();
     let (mut client, tracks) = rtsp::Client::connect(url)?;
     *conn.lock().unwrap() = client.stream();
     let video = tracks.iter().find(|t| t.codec == "h264").ok_or("no H.264 track (is the camera on H.265?)")?;
     client.setup(video, 0)?;
-    // camera audio: Protect's Opus track on channel 2
-    let opus = req.audio.as_ref().and(tracks.iter().find(|t| t.codec == "opus"));
-    if let Some(t) = opus {
-        client.setup(t, 2)?;
-    } else if req.audio.is_some() {
-        crate::log("stream: no Opus track from Protect, video only".into());
+    // camera audio on channel 2: Opus passed through, or G.711/AAC transcoded when enabled
+    let mut audio = None;
+    if let Some(a) = &req.audio {
+        let out = || srtp::Sender::new(&ep.audio_srtp_out);
+        if let Some(t) = tracks.iter().find(|t| t.codec == "opus") {
+            client.setup(t, 2)?;
+            audio = Some((AudioOut::Pass(Rewriter::opus(a.pt, ep.audio_ssrc, a.ptime, a.rate)), out()));
+        } else if let Some(t) = tracks.iter().find(|t| crate::transcode::supported(t)) {
+            if !transcode {
+                crate::log(format!("stream: camera audio is {}, HomeKit plays Opus: set transcode_audio = true for sound; video only", t.codec));
+            } else {
+                match crate::transcode::Transcoder::new(t, a.pt, ep.audio_ssrc, a.ptime, a.rate) {
+                    Ok(tc) => {
+                        client.setup(t, 2)?;
+                        crate::log(format!("stream: transcoding audio, {}", tc.describe()));
+                        audio = Some((AudioOut::Transcode(Box::new(tc)), out()));
+                    }
+                    Err(e) => crate::log(format!("stream: audio transcoder: {e}; video only")),
+                }
+            }
+        } else {
+            let codecs: Vec<&str> = tracks.iter().map(|t| t.codec.as_str()).filter(|c| *c != "h264").collect();
+            crate::log(format!("stream: no usable audio track (other tracks: {codecs:?}); video only"));
+        }
     }
     client.play()?;
     let audio_dest = SocketAddr::new(ep.controller, ep.audio_port);
-    let mut audio = opus.and(req.audio.as_ref()).map(|a| (Rewriter::opus(a.pt, ep.audio_ssrc, a.ptime, a.rate), srtp::Sender::new(&ep.audio_srtp_out)));
     let mut a_out = Vec::new();
     let (mut a_count, mut a_octets, mut a_logged) = (0u32, 0u32, false);
     let (mut vj, mut aj) = (Jitter::default(), Jitter::default());
@@ -421,7 +464,7 @@ fn run(ep: &Endpoint, req: &Request, url: &str, stop: &AtomicBool, conn: &Mutex<
             let _ = ep.video_sock.send_to(&srtp.protect_rtcp(&sender_report(ep.video_ssrc, pack.last_ts, count, octets)), dest);
             if let Some((rw, sr)) = &mut audio {
                 if a_count > 0 {
-                    let _ = ep.audio_sock.send_to(&sr.protect_rtcp(&sender_report(ep.audio_ssrc, rw.last_ts, a_count, a_octets)), audio_dest);
+                    let _ = ep.audio_sock.send_to(&sr.protect_rtcp(&sender_report(ep.audio_ssrc, rw.last_ts(), a_count, a_octets)), audio_dest);
                 }
             }
         }

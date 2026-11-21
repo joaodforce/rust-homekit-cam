@@ -7,6 +7,7 @@ Any camera (or NVR) with an **H.264** RTSP stream works. If it speaks ONVIF (mos
 |---|---|
 | H.264 video | live view, HomeKit Secure Video (with a motion source) |
 | an Opus audio track | camera audio in live view |
+| a G.711 (PCMU/PCMA) or AAC audio track | camera audio in live view with `transcode_audio = true` (see [below](#no-audio-in-live-view)) |
 | an AAC audio track | audio in recordings |
 | a JPEG snapshot URL, or ffmpeg installed | pictures in tiles and notifications |
 
@@ -52,6 +53,35 @@ Each snapshot runs `ffmpeg` once on the sub stream (`low`, else `medium`/`high`)
 about a second or two depending on the camera's keyframe interval. Pictures are cached for 5 s,
 and a ring or motion fetches a new one. Check it with `rust-homekit-cam snapshot <config>
 test.jpg`. A working `snapshot_url` is still faster and lighter.
+
+## No audio in live view
+
+HomeKit's live view plays **Opus** (or AAC-ELD), while most cameras send **G.711** (PCMU/PCMA) or
+**AAC-LC**. By default audio is passed through untouched, so such a camera streams video only and
+the log says why when you open the live view:
+
+```
+stream: camera audio is pcma, HomeKit plays Opus: set transcode_audio = true for sound; video only
+```
+
+Either switch the camera's audio codec to Opus (few offer it), or let rust-homekit-cam convert it:
+
+```toml
+transcode_audio = true     # top level of the camera's config
+```
+
+The audio (only the audio) is then decoded and re-encoded to Opus inside the binary: no ffmpeg,
+well under 1% of a CPU core per viewer. Check with
+`journalctl -u rust-homekit-cam@NAME | grep stream:` after opening the live view:
+
+```
+stream: transcoding audio, PCMA 8000 Hz → Opus 16000 Hz, 20 ms
+stream: audio flowing, Opus config 9 stereo 0 (52 bytes)
+```
+
+To see which audio codec a camera sends, `sudo rust-homekit-cam probe /etc/rust-homekit-cam/NAME.toml`
+lists the tracks (`pcmu`, `pcma`, `mpeg4-generic` = AAC, `opus`). Recordings (HKSV) keep the
+camera's AAC as is and don't need this.
 
 ## Rings and motion from Home Assistant
 
